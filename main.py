@@ -1111,9 +1111,75 @@ class TrustScoreEngine:
 class CodeGenerationEngine:
     """Generate code artifacts from data contracts for enterprise development"""
     
+    # SQL reserved words that need backticks
+    SQL_RESERVED_WORDS = {
+        'order', 'group', 'select', 'from', 'where', 'table', 'column', 'index',
+        'key', 'primary', 'foreign', 'references', 'constraint', 'unique', 'check',
+        'default', 'null', 'not', 'and', 'or', 'in', 'between', 'like', 'is',
+        'create', 'alter', 'drop', 'insert', 'update', 'delete', 'join', 'inner',
+        'outer', 'left', 'right', 'full', 'cross', 'on', 'as', 'distinct', 'all',
+        'union', 'except', 'intersect', 'case', 'when', 'then', 'else', 'end',
+        'having', 'limit', 'offset', 'fetch', 'for', 'user', 'role', 'grant',
+        'revoke', 'to', 'with', 'recursive', 'temporary', 'temp', 'if', 'exists',
+        'cascade', 'restrict', 'action', 'initially', 'deferred', 'immediate',
+        'date', 'time', 'timestamp', 'interval', 'year', 'month', 'day', 'hour',
+        'minute', 'second', 'zone', 'current', 'row', 'rows', 'range', 'partition',
+        'by', 'over', 'window', 'preceding', 'following', 'unbounded', 'current_row'
+    }
+    
+    @staticmethod
+    def _escape_sql_string(value: str) -> str:
+        """Escape single quotes and special characters in SQL strings"""
+        if value is None:
+            return ""
+        # Escape single quotes by doubling them
+        escaped = str(value).replace("'", "''")
+        # Remove or escape other problematic characters
+        escaped = escaped.replace("\\", "\\\\")
+        return escaped
+    
+    @staticmethod
+    def _escape_column_name(col_name: str) -> str:
+        """Escape column name with backticks if needed"""
+        # Check if column name needs escaping
+        needs_escape = (
+            col_name.lower() in CodeGenerationEngine.SQL_RESERVED_WORDS or
+            not col_name.isidentifier() or
+            any(c in col_name for c in [' ', '-', '.', '/', '@', '#', '$', '%'])
+        )
+        if needs_escape:
+            return f"`{col_name}`"
+        return col_name
+    
+    @staticmethod
+    def _escape_identifier(name: str) -> str:
+        """Escape any SQL identifier (table, schema, catalog names)"""
+        if any(c in name for c in [' ', '-', '.', '/', '@', '#', '$', '%']) or name.lower() in CodeGenerationEngine.SQL_RESERVED_WORDS:
+            return f"`{name}`"
+        return name
+    
+    @staticmethod
+    def _parse_decimal_precision(data_type: str) -> tuple:
+        """Parse DECIMAL(p,s) to extract precision and scale"""
+        import re
+        match = re.match(r'DECIMAL\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)', data_type.upper())
+        if match:
+            return int(match.group(1)), int(match.group(2))
+        # Default precision and scale
+        return 10, 2
+    
+    @staticmethod
+    def _parse_varchar_length(data_type: str) -> int:
+        """Parse VARCHAR(n) to extract length"""
+        import re
+        match = re.match(r'VARCHAR\s*\(\s*(\d+)\s*\)', data_type.upper())
+        if match:
+            return int(match.group(1))
+        return 255  # Default length
+    
     @staticmethod
     def generate_databricks_ddl(contract: DataContract) -> str:
-        """Generate Databricks Delta table DDL from contract"""
+        """Generate Databricks Delta table DDL from contract with proper escaping"""
         
         # Extract database and schema from FQN
         parts = contract.table_fqn.split(".")
@@ -1121,216 +1187,771 @@ class CodeGenerationEngine:
         schema = parts[1] if len(parts) > 1 else "default"
         table_name = contract.table_name
         
+        # Escape identifiers
+        esc_database = CodeGenerationEngine._escape_identifier(database)
+        esc_schema = CodeGenerationEngine._escape_identifier(schema)
+        esc_table = CodeGenerationEngine._escape_identifier(table_name)
+        
         ddl = f"""-- Databricks Delta Table DDL
 -- Generated from Data Contract: {contract.id}
 -- Contract Version: {contract.version}
 -- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
--- Owner: {contract.owner}
+-- Owner: {CodeGenerationEngine._escape_sql_string(contract.owner)}
 -- Classification: {contract.classification}
 
-CREATE TABLE IF NOT EXISTS {database}.{schema}.{table_name} (
+CREATE TABLE IF NOT EXISTS {esc_database}.{esc_schema}.{esc_table} (
 """
         
-        # Add columns
+        # Add columns with proper escaping
         column_definitions = []
         for col_name, col_info in contract.schema_definition.items():
+            esc_col = CodeGenerationEngine._escape_column_name(col_name)
             data_type = col_info.get("dataType", "STRING")
-            nullable = "NULL" if col_info.get("nullable", True) else "NOT NULL"
-            description = col_info.get("description", "")
+            nullable = "" if col_info.get("nullable", True) else " NOT NULL"
+            description = CodeGenerationEngine._escape_sql_string(col_info.get("description", ""))
             comment = f" COMMENT '{description}'" if description else ""
             
-            column_definitions.append(f"    {col_name} {data_type} {nullable}{comment}")
+            column_definitions.append(f"    {esc_col} {data_type}{nullable}{comment}")
         
         ddl += ",\n".join(column_definitions)
         ddl += "\n)\n"
         
-        # Add table properties
+        # Add table properties with escaped values
+        esc_description = CodeGenerationEngine._escape_sql_string(contract.description[:200] if contract.description else "")
+        esc_owner = CodeGenerationEngine._escape_sql_string(contract.owner)
+        esc_business_purpose = CodeGenerationEngine._escape_sql_string(contract.business_purpose[:100] if contract.business_purpose else "")
+        
         ddl += "USING DELTA\n"
-        ddl += f"COMMENT 'Data Contract: {contract.description}'\n"
+        ddl += f"COMMENT '{esc_description}'\n"
         ddl += "TBLPROPERTIES (\n"
-        ddl += f"    'contract_id' = '{contract.id}',\n"
-        ddl += f"    'contract_version' = '{contract.version}',\n"
-        ddl += f"    'owner' = '{contract.owner}',\n"
-        ddl += f"    'classification' = '{contract.classification}',\n"
-        ddl += f"    'contains_pii' = '{str(contract.contains_pii).lower()}',\n"
+        ddl += f"    'contract.id' = '{contract.id}',\n"
+        ddl += f"    'contract.version' = '{contract.version}',\n"
+        ddl += f"    'contract.owner' = '{esc_owner}',\n"
+        ddl += f"    'contract.classification' = '{contract.classification}',\n"
+        ddl += f"    'contract.contains_pii' = '{str(contract.contains_pii).lower()}',\n"
         freshness_hours = contract.sla_requirements.get('freshness_hours', 24)
-        ddl += f"    'sla_freshness_hours' = '{freshness_hours}',\n"
-        ddl += f"    'business_purpose' = '{contract.business_purpose[:100]}'\n"
+        ddl += f"    'contract.sla_freshness_hours' = '{freshness_hours}',\n"
+        ddl += f"    'contract.business_purpose' = '{esc_business_purpose}'\n"
         ddl += ");\n\n"
         
-        # Add documentation
+        # Add documentation comments
         ddl += f"-- Business Purpose:\n-- {contract.business_purpose}\n\n"
         ddl += f"-- SLA Requirements:\n"
-        freshness_hours_doc = contract.sla_requirements.get('freshness_hours', 24)
-        ddl += f"--   Freshness: {freshness_hours_doc} hours\n\n"
+        ddl += f"--   Freshness: {freshness_hours} hours\n\n"
         
         if contract.contains_pii:
             ddl += "-- ⚠️ WARNING: This table contains PII data\n"
             ddl += f"-- Retention Period: {contract.retention_days or 'Not specified'} days\n\n"
         
+        # Add quality rules as comments
+        if contract.quality_rules:
+            ddl += "-- Data Quality Rules:\n"
+            for rule in contract.quality_rules:
+                rule_type = rule.get('type', 'unknown')
+                col = rule.get('column', 'N/A')
+                ddl += f"--   - {rule_type} on column '{col}': {rule}\n"
+            ddl += "\n"
+        
         return ddl
     
     @staticmethod
     def generate_pyspark_schema(contract: DataContract) -> str:
-        """Generate PySpark schema definition from contract"""
+        """Generate PySpark schema definition from contract with proper type handling"""
         
-        code = f"""# PySpark Schema Definition
+        table_name_safe = contract.table_name.replace("-", "_").replace(" ", "_")
+        
+        code = f'''# PySpark Schema Definition
 # Generated from Data Contract: {contract.id}
 # Contract Version: {contract.version}
 # Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-from pyspark.sql.types import *
+from pyspark.sql.types import (
+    StructType, StructField, StringType, IntegerType, LongType,
+    DoubleType, FloatType, BooleanType, DateType, TimestampType,
+    BinaryType, DecimalType
+)
 
 # Schema for {contract.table_name}
-{contract.table_name}_schema = StructType([
-"""
+{table_name_safe}_schema = StructType([
+'''
         
-        # Map SQL types to PySpark types
-        type_mapping = {
-            "VARCHAR": "StringType()",
-            "STRING": "StringType()",
-            "INTEGER": "IntegerType()",
-            "INT": "IntegerType()",
-            "BIGINT": "LongType()",
-            "DECIMAL": "DecimalType()",
-            "DOUBLE": "DoubleType()",
-            "FLOAT": "FloatType()",
-            "BOOLEAN": "BooleanType()",
-            "DATE": "DateType()",
-            "TIMESTAMP": "TimestampType()",
-            "BINARY": "BinaryType()"
-        }
-        
-        # Add struct fields
+        # Add struct fields with proper type handling
         field_definitions = []
         for col_name, col_info in contract.schema_definition.items():
-            data_type = col_info.get("dataType", "STRING").upper().split("(")[0]
-            pyspark_type = type_mapping.get(data_type, "StringType()")
-            nullable = str(col_info.get("nullable", True)).lower()
+            raw_type = col_info.get("dataType", "STRING").upper()
+            base_type = raw_type.split("(")[0]
+            nullable = col_info.get("nullable", True)
             
-            field_definitions.append(f'    StructField("{col_name}", {pyspark_type}, {nullable})')
+            # Map SQL types to PySpark types with proper precision handling
+            if base_type in ("VARCHAR", "STRING", "CHAR", "TEXT"):
+                pyspark_type = "StringType()"
+            elif base_type in ("INTEGER", "INT"):
+                pyspark_type = "IntegerType()"
+            elif base_type == "BIGINT":
+                pyspark_type = "LongType()"
+            elif base_type == "DECIMAL":
+                precision, scale = CodeGenerationEngine._parse_decimal_precision(raw_type)
+                pyspark_type = f"DecimalType({precision}, {scale})"
+            elif base_type == "DOUBLE":
+                pyspark_type = "DoubleType()"
+            elif base_type == "FLOAT":
+                pyspark_type = "FloatType()"
+            elif base_type == "BOOLEAN":
+                pyspark_type = "BooleanType()"
+            elif base_type == "DATE":
+                pyspark_type = "DateType()"
+            elif base_type in ("TIMESTAMP", "DATETIME"):
+                pyspark_type = "TimestampType()"
+            elif base_type == "BINARY":
+                pyspark_type = "BinaryType()"
+            else:
+                pyspark_type = "StringType()"  # Default to string
+            
+            # Use proper Python boolean (True/False, not true/false)
+            nullable_str = "True" if nullable else "False"
+            field_definitions.append(f'    StructField("{col_name}", {pyspark_type}, {nullable_str})')
         
         code += ",\n".join(field_definitions)
         code += "\n])\n\n"
         
-        # Add usage example
-        code += f"""# Usage Example:
-df = spark.read.format("delta") \\
-    .schema({contract.table_name}_schema) \\
-    .load("{contract.table_fqn}")
+        # Add usage example with correct path format
+        parts = contract.table_fqn.split(".")
+        catalog = parts[0] if len(parts) > 0 else "main"
+        schema_name = parts[1] if len(parts) > 1 else "default"
+        
+        code += f'''# Usage Example - Read from Unity Catalog:
+df = spark.table("{contract.table_fqn}")
 
-# Or for DataFrame creation:
-df = spark.createDataFrame(data, schema={contract.table_name}_schema)
+# Or read from Delta path with schema validation:
+# df = spark.read.format("delta") \\
+#     .schema({table_name_safe}_schema) \\
+#     .load("/mnt/data/{catalog}/{schema_name}/{contract.table_name}")
 
-# Validate schema
-df.printSchema()
-"""
+# Create DataFrame with schema:
+# df = spark.createDataFrame(data, schema={table_name_safe}_schema)
+
+# Validate schema matches
+def validate_schema(df):
+    """Validate DataFrame schema against contract"""
+    expected = set({table_name_safe}_schema.fieldNames())
+    actual = set(df.schema.fieldNames())
+    
+    missing = expected - actual
+    extra = actual - expected
+    
+    if missing:
+        print(f"⚠️ Missing columns: {{missing}}")
+    if extra:
+        print(f"ℹ️ Extra columns: {{extra}}")
+    if not missing and not extra:
+        print("✅ Schema matches contract")
+    
+    return len(missing) == 0
+
+# validate_schema(df)
+'''
         
         return code
     
     @staticmethod
     def generate_quality_tests(contract: DataContract) -> str:
-        """Generate PySpark data quality tests from contract"""
+        """Generate PySpark data quality tests from contract quality rules"""
         return CodeGenerationEngine._generate_pyspark_tests(contract)
     
     @staticmethod
     def _generate_pyspark_tests(contract: DataContract) -> str:
-        """Generate PySpark validation code"""
+        """Generate comprehensive PySpark validation code using contract quality rules"""
         
-        code = f"""# PySpark Data Quality Validation
+        table_name_safe = contract.table_name.replace("-", "_").replace(" ", "_")
+        
+        code = f'''# PySpark Data Quality Validation
 # Generated from Data Contract: {contract.id}
 # Contract Version: {contract.version}
+# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+#
+# This module validates data against the contract's quality rules.
+# Quality Rules Configured: {len(contract.quality_rules)}
 
 from pyspark.sql import functions as F
 from pyspark.sql import DataFrame
+from pyspark.sql.window import Window
+from datetime import datetime, timedelta
+from typing import Dict, List, Any
 
-def validate_{contract.table_name}(df: DataFrame) -> dict:
-    \"\"\"
+class DataQualityValidator:
+    """
+    Data Quality Validator for {contract.table_name}
+    Contract ID: {contract.id}
+    """
+    
+    def __init__(self, df: DataFrame):
+        self.df = df
+        self.results = {{
+            "table_name": "{contract.table_name}",
+            "contract_id": "{contract.id}",
+            "contract_version": "{contract.version}",
+            "validation_timestamp": datetime.now().isoformat(),
+            "total_rows": 0,
+            "checks": [],
+            "summary": {{
+                "total_checks": 0,
+                "passed": 0,
+                "failed": 0,
+                "warnings": 0
+            }}
+        }}
+    
+    def _add_check_result(self, check_name: str, check_type: str, column: str,
+                          passed: bool, details: Dict[str, Any], threshold: float = None):
+        """Add a check result to the results dictionary"""
+        status = "passed" if passed else "failed"
+        
+        # Handle threshold-based checks (warning if close to threshold)
+        if threshold is not None and passed:
+            actual_rate = details.get("pass_rate", 1.0)
+            if actual_rate < threshold + 0.05:  # Within 5% of threshold
+                status = "warning"
+        
+        self.results["checks"].append({{
+            "check_name": check_name,
+            "check_type": check_type,
+            "column": column,
+            "status": status,
+            "threshold": threshold,
+            "details": details
+        }})
+        
+        self.results["summary"]["total_checks"] += 1
+        if status == "passed":
+            self.results["summary"]["passed"] += 1
+        elif status == "failed":
+            self.results["summary"]["failed"] += 1
+        else:
+            self.results["summary"]["warnings"] += 1
+    
+    def check_null(self, column: str, threshold: float = 0.95) -> bool:
+        """
+        Check null rate for a column
+        Args:
+            column: Column name to check
+            threshold: Minimum percentage of non-null values required (0.0 to 1.0)
+        """
+        total = self.df.count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_null_check", "null_check", column, False,
+                {{"error": "No rows in DataFrame"}}, threshold
+            )
+            return False
+        
+        null_count = self.df.filter(F.col(column).isNull()).count()
+        non_null_rate = (total - null_count) / total
+        passed = non_null_rate >= threshold
+        
+        self._add_check_result(
+            f"{{column}}_null_check", "null_check", column, passed,
+            {{
+                "total_rows": total,
+                "null_count": null_count,
+                "non_null_count": total - null_count,
+                "non_null_rate": round(non_null_rate, 4),
+                "pass_rate": round(non_null_rate, 4),
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def check_uniqueness(self, column: str, threshold: float = 1.0) -> bool:
+        """
+        Check uniqueness of values in a column
+        Args:
+            column: Column name to check
+            threshold: Minimum percentage of unique values required (0.0 to 1.0)
+        """
+        total = self.df.count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_uniqueness", "uniqueness", column, False,
+                {{"error": "No rows in DataFrame"}}, threshold
+            )
+            return False
+        
+        # Count duplicates
+        duplicate_count = self.df.groupBy(column).count().filter(F.col("count") > 1).count()
+        duplicate_rows = self.df.groupBy(column).count().filter(F.col("count") > 1) \\
+            .agg(F.sum("count")).collect()[0][0] or 0
+        
+        unique_count = self.df.select(column).distinct().count()
+        uniqueness_rate = unique_count / total if total > 0 else 0
+        passed = uniqueness_rate >= threshold
+        
+        self._add_check_result(
+            f"{{column}}_uniqueness", "uniqueness", column, passed,
+            {{
+                "total_rows": total,
+                "unique_values": unique_count,
+                "duplicate_groups": duplicate_count,
+                "duplicate_rows": int(duplicate_rows) if duplicate_rows else 0,
+                "uniqueness_rate": round(uniqueness_rate, 4),
+                "pass_rate": round(uniqueness_rate, 4),
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def check_range(self, column: str, min_value=None, max_value=None, threshold: float = 1.0) -> bool:
+        """
+        Check if values fall within specified range
+        Args:
+            column: Column name to check
+            min_value: Minimum allowed value (inclusive)
+            max_value: Maximum allowed value (inclusive)
+            threshold: Minimum percentage of values within range (0.0 to 1.0)
+        """
+        total = self.df.filter(F.col(column).isNotNull()).count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_range", "range_check", column, False,
+                {{"error": "No non-null rows"}}, threshold
+            )
+            return False
+        
+        # Build filter condition
+        conditions = []
+        if min_value is not None:
+            conditions.append(F.col(column) < min_value)
+        if max_value is not None:
+            conditions.append(F.col(column) > max_value)
+        
+        if not conditions:
+            self._add_check_result(
+                f"{{column}}_range", "range_check", column, True,
+                {{"info": "No range constraints specified"}}, threshold
+            )
+            return True
+        
+        out_of_range_filter = conditions[0]
+        for cond in conditions[1:]:
+            out_of_range_filter = out_of_range_filter | cond
+        
+        out_of_range = self.df.filter(F.col(column).isNotNull()).filter(out_of_range_filter).count()
+        in_range_rate = (total - out_of_range) / total
+        passed = in_range_rate >= threshold
+        
+        # Get actual min/max for reporting
+        stats = self.df.agg(
+            F.min(column).alias("actual_min"),
+            F.max(column).alias("actual_max")
+        ).collect()[0]
+        
+        self._add_check_result(
+            f"{{column}}_range", "range_check", column, passed,
+            {{
+                "total_rows": total,
+                "out_of_range_count": out_of_range,
+                "in_range_count": total - out_of_range,
+                "in_range_rate": round(in_range_rate, 4),
+                "pass_rate": round(in_range_rate, 4),
+                "expected_min": str(min_value),
+                "expected_max": str(max_value),
+                "actual_min": str(stats["actual_min"]),
+                "actual_max": str(stats["actual_max"]),
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def check_format(self, column: str, pattern: str, pattern_type: str = "custom", 
+                     threshold: float = 0.95) -> bool:
+        """
+        Check if values match a regex pattern
+        Args:
+            column: Column name to check
+            pattern: Regex pattern to match
+            pattern_type: Type of pattern (email, phone, url, uuid, custom)
+            threshold: Minimum percentage of matching values (0.0 to 1.0)
+        """
+        total = self.df.filter(F.col(column).isNotNull()).count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_format", "format_check", column, False,
+                {{"error": "No non-null rows"}}, threshold
+            )
+            return False
+        
+        non_matching = self.df.filter(
+            F.col(column).isNotNull() & ~F.col(column).rlike(pattern)
+        ).count()
+        
+        match_rate = (total - non_matching) / total
+        passed = match_rate >= threshold
+        
+        # Get sample non-matching values for debugging
+        sample_failures = []
+        if non_matching > 0:
+            samples = self.df.filter(
+                F.col(column).isNotNull() & ~F.col(column).rlike(pattern)
+            ).select(column).limit(3).collect()
+            sample_failures = [str(row[0])[:50] for row in samples]
+        
+        self._add_check_result(
+            f"{{column}}_format", "format_check", column, passed,
+            {{
+                "total_rows": total,
+                "matching_count": total - non_matching,
+                "non_matching_count": non_matching,
+                "match_rate": round(match_rate, 4),
+                "pass_rate": round(match_rate, 4),
+                "pattern_type": pattern_type,
+                "pattern": pattern[:100],  # Truncate long patterns
+                "sample_failures": sample_failures,
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def check_length(self, column: str, min_length: int = None, max_length: int = None,
+                     threshold: float = 1.0) -> bool:
+        """
+        Check string length constraints
+        Args:
+            column: Column name to check
+            min_length: Minimum string length
+            max_length: Maximum string length
+            threshold: Minimum percentage of values within length constraints (0.0 to 1.0)
+        """
+        total = self.df.filter(F.col(column).isNotNull()).count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_length", "length_check", column, False,
+                {{"error": "No non-null rows"}}, threshold
+            )
+            return False
+        
+        # Build filter for violations
+        conditions = []
+        if min_length is not None:
+            conditions.append(F.length(F.col(column)) < min_length)
+        if max_length is not None:
+            conditions.append(F.length(F.col(column)) > max_length)
+        
+        if not conditions:
+            self._add_check_result(
+                f"{{column}}_length", "length_check", column, True,
+                {{"info": "No length constraints specified"}}, threshold
+            )
+            return True
+        
+        violation_filter = conditions[0]
+        for cond in conditions[1:]:
+            violation_filter = violation_filter | cond
+        
+        violations = self.df.filter(F.col(column).isNotNull()).filter(violation_filter).count()
+        valid_rate = (total - violations) / total
+        passed = valid_rate >= threshold
+        
+        # Get length stats
+        stats = self.df.filter(F.col(column).isNotNull()).agg(
+            F.min(F.length(column)).alias("min_len"),
+            F.max(F.length(column)).alias("max_len"),
+            F.avg(F.length(column)).alias("avg_len")
+        ).collect()[0]
+        
+        self._add_check_result(
+            f"{{column}}_length", "length_check", column, passed,
+            {{
+                "total_rows": total,
+                "valid_count": total - violations,
+                "violation_count": violations,
+                "valid_rate": round(valid_rate, 4),
+                "pass_rate": round(valid_rate, 4),
+                "expected_min_length": min_length,
+                "expected_max_length": max_length,
+                "actual_min_length": stats["min_len"],
+                "actual_max_length": stats["max_len"],
+                "actual_avg_length": round(stats["avg_len"], 2) if stats["avg_len"] else None,
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def check_allowed_values(self, column: str, allowed_values: List[str],
+                             threshold: float = 1.0) -> bool:
+        """
+        Check if values are in allowed list
+        Args:
+            column: Column name to check
+            allowed_values: List of allowed values
+            threshold: Minimum percentage of valid values (0.0 to 1.0)
+        """
+        total = self.df.filter(F.col(column).isNotNull()).count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_allowed_values", "allowed_values", column, False,
+                {{"error": "No non-null rows"}}, threshold
+            )
+            return False
+        
+        invalid_count = self.df.filter(
+            F.col(column).isNotNull() & ~F.col(column).isin(allowed_values)
+        ).count()
+        
+        valid_rate = (total - invalid_count) / total
+        passed = valid_rate >= threshold
+        
+        # Get invalid values sample
+        invalid_samples = []
+        if invalid_count > 0:
+            samples = self.df.filter(
+                F.col(column).isNotNull() & ~F.col(column).isin(allowed_values)
+            ).select(column).distinct().limit(5).collect()
+            invalid_samples = [str(row[0]) for row in samples]
+        
+        self._add_check_result(
+            f"{{column}}_allowed_values", "allowed_values", column, passed,
+            {{
+                "total_rows": total,
+                "valid_count": total - invalid_count,
+                "invalid_count": invalid_count,
+                "valid_rate": round(valid_rate, 4),
+                "pass_rate": round(valid_rate, 4),
+                "allowed_values_count": len(allowed_values),
+                "sample_invalid_values": invalid_samples,
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def check_freshness(self, column: str, max_age_hours: int, threshold: float = 1.0) -> bool:
+        """
+        Check data freshness for timestamp columns
+        Args:
+            column: Timestamp column name
+            max_age_hours: Maximum allowed age in hours
+            threshold: Minimum percentage of fresh records (0.0 to 1.0)
+        """
+        total = self.df.filter(F.col(column).isNotNull()).count()
+        if total == 0:
+            self._add_check_result(
+                f"{{column}}_freshness", "freshness_check", column, False,
+                {{"error": "No non-null rows"}}, threshold
+            )
+            return False
+        
+        cutoff_time = datetime.now() - timedelta(hours=max_age_hours)
+        stale_count = self.df.filter(
+            F.col(column).isNotNull() & (F.col(column) < F.lit(cutoff_time))
+        ).count()
+        
+        fresh_rate = (total - stale_count) / total
+        passed = fresh_rate >= threshold
+        
+        # Get freshness stats
+        stats = self.df.filter(F.col(column).isNotNull()).agg(
+            F.min(column).alias("oldest"),
+            F.max(column).alias("newest")
+        ).collect()[0]
+        
+        self._add_check_result(
+            f"{{column}}_freshness", "freshness_check", column, passed,
+            {{
+                "total_rows": total,
+                "fresh_count": total - stale_count,
+                "stale_count": stale_count,
+                "fresh_rate": round(fresh_rate, 4),
+                "pass_rate": round(fresh_rate, 4),
+                "max_age_hours": max_age_hours,
+                "cutoff_time": cutoff_time.isoformat(),
+                "oldest_record": str(stats["oldest"]),
+                "newest_record": str(stats["newest"]),
+                "threshold": threshold
+            }},
+            threshold
+        )
+        return passed
+    
+    def run_all_checks(self) -> Dict[str, Any]:
+        """Run all configured quality checks and return results"""
+        self.results["total_rows"] = self.df.count()
+        
+        # Run schema validation first
+        expected_columns = {list(contract.schema_definition.keys())}
+        actual_columns = set(self.df.columns)
+        missing_cols = expected_columns - actual_columns
+        extra_cols = actual_columns - expected_columns
+        
+        self._add_check_result(
+            "schema_validation", "schema", "N/A",
+            len(missing_cols) == 0,
+            {{
+                "expected_columns": list(expected_columns),
+                "actual_columns": list(actual_columns),
+                "missing_columns": list(missing_cols),
+                "extra_columns": list(extra_cols)
+            }}
+        )
+'''
+        
+        # Generate checks from contract quality rules
+        if contract.quality_rules:
+            code += "\n        # Contract-defined quality rules\n"
+            
+            for rule in contract.quality_rules:
+                rule_type = rule.get('type', '')
+                column = rule.get('column', '')
+                threshold = rule.get('threshold', 0.95)
+                
+                if rule_type == 'null_check' and column:
+                    code += f'        self.check_null("{column}", threshold={threshold})\n'
+                
+                elif rule_type == 'uniqueness' and column:
+                    code += f'        self.check_uniqueness("{column}", threshold={threshold})\n'
+                
+                elif rule_type == 'range_check' and column:
+                    min_val = rule.get('min_value')
+                    max_val = rule.get('max_value')
+                    min_str = f'"{min_val}"' if isinstance(min_val, str) else str(min_val) if min_val is not None else 'None'
+                    max_str = f'"{max_val}"' if isinstance(max_val, str) else str(max_val) if max_val is not None else 'None'
+                    code += f'        self.check_range("{column}", min_value={min_str}, max_value={max_str}, threshold={threshold})\n'
+                
+                elif rule_type == 'format_check' and column:
+                    pattern = rule.get('regex') or rule.get('custom_regex', '.*')
+                    pattern_type = rule.get('pattern_type', 'custom')
+                    # Escape the pattern for Python string
+                    escaped_pattern = pattern.replace('\\', '\\\\').replace('"', '\\"')
+                    code += f'        self.check_format("{column}", pattern=r"{escaped_pattern}", pattern_type="{pattern_type}", threshold={threshold})\n'
+                
+                elif rule_type == 'length_check' and column:
+                    min_len = rule.get('min_length')
+                    max_len = rule.get('max_length')
+                    code += f'        self.check_length("{column}", min_length={min_len}, max_length={max_len}, threshold={threshold})\n'
+                
+                elif rule_type == 'allowed_values' and column:
+                    values = rule.get('allowed_values', [])
+                    values_str = str(values)
+                    code += f'        self.check_allowed_values("{column}", allowed_values={values_str}, threshold={threshold})\n'
+                
+                elif rule_type == 'freshness_check' and column:
+                    max_age = rule.get('max_age_hours', 24)
+                    code += f'        self.check_freshness("{column}", max_age_hours={max_age}, threshold={threshold})\n'
+        
+        # Also generate checks based on schema constraints (NOT NULL columns)
+        code += "\n        # Schema-based constraints (NOT NULL columns)\n"
+        for col_name, col_info in contract.schema_definition.items():
+            if not col_info.get("nullable", True):
+                # Check if we already have a null_check rule for this column
+                existing_null_check = any(
+                    r.get('type') == 'null_check' and r.get('column') == col_name 
+                    for r in contract.quality_rules
+                )
+                if not existing_null_check:
+                    code += f'        self.check_null("{col_name}", threshold=1.0)  # NOT NULL constraint\n'
+        
+        code += '''
+        return self.results
+    
+    def print_summary(self):
+        """Print a formatted summary of validation results"""
+        summary = self.results["summary"]
+        print("=" * 60)
+        print(f"DATA QUALITY VALIDATION REPORT")
+        print(f"Table: {self.results['table_name']}")
+        print(f"Contract: {self.results['contract_id']} v{self.results['contract_version']}")
+        print(f"Timestamp: {self.results['validation_timestamp']}")
+        print(f"Total Rows: {self.results['total_rows']:,}")
+        print("=" * 60)
+        print(f"Total Checks: {summary['total_checks']}")
+        print(f"  ✅ Passed:   {summary['passed']}")
+        print(f"  ⚠️ Warnings: {summary['warnings']}")
+        print(f"  ❌ Failed:   {summary['failed']}")
+        print("=" * 60)
+        
+        # Print failed checks
+        failed = [c for c in self.results["checks"] if c["status"] == "failed"]
+        if failed:
+            print("\\nFAILED CHECKS:")
+            for check in failed:
+                print(f"  ❌ {check['check_name']} ({check['column']})")
+                print(f"     Details: {check['details']}")
+        
+        # Print warnings
+        warnings = [c for c in self.results["checks"] if c["status"] == "warning"]
+        if warnings:
+            print("\\nWARNINGS:")
+            for check in warnings:
+                print(f"  ⚠️ {check['check_name']} ({check['column']})")
+                print(f"     Pass rate close to threshold")
+
+
+'''
+        
+        code += f'''# Convenience function for quick validation
+def validate_{table_name_safe}(df: DataFrame) -> Dict[str, Any]:
+    """
     Validate {contract.table_name} against data contract
     Returns validation results dictionary
-    \"\"\"
-    
-    results = {{
-        "table_name": "{contract.table_name}",
-        "contract_id": "{contract.id}",
-        "contract_version": "{contract.version}",
-        "validation_timestamp": "{datetime.now().isoformat()}",
-        "checks": []
-    }}
-    
-    # Row count check
-    row_count = df.count()
-    results["checks"].append({{
-        "check": "row_count",
-        "status": "passed" if row_count > 0 else "failed",
-        "value": row_count
-    }})
-    
-    # Column count check
-    expected_columns = {len(contract.schema_definition)}
-    actual_columns = len(df.columns)
-    results["checks"].append({{
-        "check": "column_count",
-        "status": "passed" if actual_columns == expected_columns else "failed",
-        "expected": expected_columns,
-        "actual": actual_columns
-    }})
-    
-    # Column-level checks
-"""
-        
-        for col_name, col_info in contract.schema_definition.items():
-            code += f"""
-    # {col_name} validation
-"""
-            if not col_info.get("nullable", True):
-                code += f"""    null_count = df.filter(F.col("{col_name}").isNull()).count()
-    results["checks"].append({{
-        "check": "{col_name}_not_null",
-        "status": "passed" if null_count == 0 else "failed",
-        "null_count": null_count
-    }})
-"""
-        
-        code += """
+    """
+    validator = DataQualityValidator(df)
+    results = validator.run_all_checks()
+    validator.print_summary()
     return results
 
-# Usage
-# validation_results = validate_{}(df)
-# print(validation_results)
-""".format(contract.table_name)
+
+# Usage Example:
+# from pyspark.sql import SparkSession
+# spark = SparkSession.builder.appName("DQ Validation").getOrCreate()
+# df = spark.table("{contract.table_fqn}")
+# results = validate_{table_name_safe}(df)
+# 
+# # Access results programmatically:
+# if results["summary"]["failed"] > 0:
+#     raise Exception(f"Data quality validation failed: {{results['summary']['failed']}} checks failed")
+'''
         
         return code
     
     @staticmethod
     def generate_unity_catalog_sql(contract: DataContract) -> str:
-        """Generate Unity Catalog registration SQL"""
+        """Generate Unity Catalog registration SQL with proper escaping"""
         
         parts = contract.table_fqn.split(".")
         catalog = parts[0] if len(parts) > 0 else "main"
         schema = parts[1] if len(parts) > 1 else "default"
         table_name = contract.table_name
         
+        # Escape identifiers
+        esc_catalog = CodeGenerationEngine._escape_identifier(catalog)
+        esc_schema = CodeGenerationEngine._escape_identifier(schema)
+        esc_table = CodeGenerationEngine._escape_identifier(table_name)
+        
+        # Escape string values
+        esc_business_purpose = CodeGenerationEngine._escape_sql_string(contract.business_purpose[:100] if contract.business_purpose else "")
+        esc_owner = CodeGenerationEngine._escape_sql_string(contract.owner)
+        
         sql = f"""-- Unity Catalog Registration
 -- Generated from Data Contract: {contract.id}
+-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 -- Create catalog if not exists
-CREATE CATALOG IF NOT EXISTS {catalog};
+CREATE CATALOG IF NOT EXISTS {esc_catalog};
 
 -- Create schema if not exists
-CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}
-COMMENT 'Data Contract: {contract.business_purpose[:100]}';
+CREATE SCHEMA IF NOT EXISTS {esc_catalog}.{esc_schema}
+COMMENT '{esc_business_purpose}';
 
--- Register table (assuming table already exists)
--- Table: {catalog}.{schema}.{table_name}
-
--- Set table properties
-ALTER TABLE {catalog}.{schema}.{table_name} SET TBLPROPERTIES (
-    'contract_id' = '{contract.id}',
-    'contract_version' = '{contract.version}',
-    'owner' = '{contract.owner}',
-    'classification' = '{contract.classification}',
-    'contains_pii' = '{str(contract.contains_pii).lower()}'
+-- Set table properties for contract tracking
+ALTER TABLE {esc_catalog}.{esc_schema}.{esc_table} SET TBLPROPERTIES (
+    'contract.id' = '{contract.id}',
+    'contract.version' = '{contract.version}',
+    'contract.owner' = '{esc_owner}',
+    'contract.classification' = '{contract.classification}',
+    'contract.contains_pii' = '{str(contract.contains_pii).lower()}'
 );
 
 -- Add column comments
@@ -1339,22 +1960,43 @@ ALTER TABLE {catalog}.{schema}.{table_name} SET TBLPROPERTIES (
         for col_name, col_info in contract.schema_definition.items():
             description = col_info.get("description", "")
             if description:
-                sql += f"COMMENT ON COLUMN {catalog}.{schema}.{table_name}.{col_name} IS '{description}';\n"
+                esc_col = CodeGenerationEngine._escape_column_name(col_name)
+                esc_desc = CodeGenerationEngine._escape_sql_string(description)
+                sql += f"ALTER TABLE {esc_catalog}.{esc_schema}.{esc_table} ALTER COLUMN {esc_col} COMMENT '{esc_desc}';\n"
+        
+        # Classification-based tagging
+        sql += f"\n-- Apply classification tags\n"
+        sql += f"ALTER TABLE {esc_catalog}.{esc_schema}.{esc_table} SET TAGS ('classification' = '{contract.classification}');\n"
+        
+        if contract.contains_pii:
+            sql += f"ALTER TABLE {esc_catalog}.{esc_schema}.{esc_table} SET TAGS ('contains_pii' = 'true');\n"
+            
+            # Tag PII columns
+            sql += "\n-- Tag PII columns\n"
+            for col_name, col_info in contract.schema_definition.items():
+                if col_info.get("isPII", False):
+                    esc_col = CodeGenerationEngine._escape_column_name(col_name)
+                    sql += f"ALTER TABLE {esc_catalog}.{esc_schema}.{esc_table} ALTER COLUMN {esc_col} SET TAGS ('pii' = 'true');\n"
         
         sql += f"\n-- Grant permissions based on classification\n"
+        sql += f"-- NOTE: Replace placeholder group names with your actual security groups\n"
         if contract.classification == "public":
-            sql += f"GRANT SELECT ON TABLE {catalog}.{schema}.{table_name} TO `all_users`;\n"
+            sql += f"-- GRANT SELECT ON TABLE {esc_catalog}.{esc_schema}.{esc_table} TO `data_consumers`;\n"
         elif contract.classification == "internal":
-            sql += f"GRANT SELECT ON TABLE {catalog}.{schema}.{table_name} TO `internal_users`;\n"
-        elif contract.classification in ["confidential", "restricted"]:
-            sql += f"-- Restricted access - manual grants required\n"
-            sql += f"-- GRANT SELECT ON TABLE {catalog}.{schema}.{table_name} TO <user_or_group>;\n"
+            sql += f"-- GRANT SELECT ON TABLE {esc_catalog}.{esc_schema}.{esc_table} TO `internal_data_users`;\n"
+        elif contract.classification == "confidential":
+            sql += f"-- GRANT SELECT ON TABLE {esc_catalog}.{esc_schema}.{esc_table} TO `confidential_data_users`;\n"
+            sql += f"-- Consider enabling row-level or column-level security\n"
+        elif contract.classification == "restricted":
+            sql += f"-- RESTRICTED: Manual approval and grants required\n"
+            sql += f"-- GRANT SELECT ON TABLE {esc_catalog}.{esc_schema}.{esc_table} TO `approved_user`;\n"
+            sql += f"-- Enable audit logging for all access\n"
         
         return sql
     
     @staticmethod
     def generate_documentation(contract: DataContract) -> str:
-        """Generate Markdown documentation"""
+        """Generate comprehensive Markdown documentation"""
         
         doc = f"""# Data Contract: {contract.table_name}
 
@@ -1363,6 +2005,7 @@ ALTER TABLE {catalog}.{schema}.{table_name} SET TBLPROPERTIES (
 **Status:** {contract.status}  
 **Owner:** {contract.owner}  
 **Classification:** {contract.classification}  
+**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ---
 
@@ -1376,56 +2019,93 @@ ALTER TABLE {catalog}.{schema}.{table_name} SET TBLPROPERTIES (
 
 ---
 
-## Schema
+## Schema Definition
 
 | Column Name | Data Type | Nullable | PII | Description |
-|------------|-----------|----------|-----|-------------|
+|-------------|-----------|----------|-----|-------------|
 """
         
         for col_name, col_info in contract.schema_definition.items():
             data_type = col_info.get("dataType", "STRING")
-            nullable = "✓" if col_info.get("nullable", True) else "✗"
+            nullable = "Yes" if col_info.get("nullable", True) else "**No**"
             is_pii = "🔒 Yes" if col_info.get("isPII", False) else "No"
             description = col_info.get("description", "-")
             
             doc += f"| `{col_name}` | {data_type} | {nullable} | {is_pii} | {description} |\n"
         
-        doc += "\n---\n\n## Quality Rules\n\n"
+        doc += "\n---\n\n## Data Quality Rules\n\n"
         
         if contract.quality_rules:
-            for i, rule in enumerate(contract.quality_rules, 1):
-                doc += f"{i}. **{rule.get('type', 'Unknown')}**: {rule}\n"
+            doc += "| Rule Type | Column | Configuration | Threshold |\n"
+            doc += "|-----------|--------|---------------|----------:|\n"
+            
+            for rule in contract.quality_rules:
+                rule_type = rule.get('type', 'Unknown')
+                column = rule.get('column', 'N/A')
+                threshold = rule.get('threshold', 'N/A')
+                if isinstance(threshold, float):
+                    threshold = f"{threshold*100:.0f}%"
+                
+                # Build config summary
+                config_parts = []
+                if 'min_value' in rule:
+                    config_parts.append(f"min={rule['min_value']}")
+                if 'max_value' in rule:
+                    config_parts.append(f"max={rule['max_value']}")
+                if 'pattern_type' in rule:
+                    config_parts.append(f"pattern={rule['pattern_type']}")
+                if 'min_length' in rule:
+                    config_parts.append(f"min_len={rule['min_length']}")
+                if 'max_length' in rule:
+                    config_parts.append(f"max_len={rule['max_length']}")
+                if 'max_age_hours' in rule:
+                    config_parts.append(f"max_age={rule['max_age_hours']}h")
+                if 'allowed_values' in rule:
+                    count = len(rule['allowed_values'])
+                    config_parts.append(f"{count} allowed values")
+                
+                config = ", ".join(config_parts) if config_parts else "-"
+                doc += f"| {rule_type} | `{column}` | {config} | {threshold} |\n"
         else:
             doc += "*No quality rules defined*\n"
         
         doc += "\n---\n\n## SLA Requirements\n\n"
-        doc += f"- **Freshness:** {contract.sla_requirements.get('freshness_hours', 24)} hours\n"
+        doc += f"| Requirement | Value |\n"
+        doc += f"|-------------|-------|\n"
+        doc += f"| **Freshness** | {contract.sla_requirements.get('freshness_hours', 24)} hours |\n"
         
         if contract.retention_days:
-            doc += f"- **Retention:** {contract.retention_days} days\n"
+            doc += f"| **Retention** | {contract.retention_days} days |\n"
         
-        doc += "\n---\n\n## Compliance\n\n"
-        doc += f"- **Contains PII:** {'Yes' if contract.contains_pii else 'No'}\n"
+        doc += "\n---\n\n## Compliance & Security\n\n"
+        doc += f"| Attribute | Value |\n"
+        doc += f"|-----------|-------|\n"
+        doc += f"| **Classification** | {contract.classification} |\n"
+        doc += f"| **Contains PII** | {'Yes ⚠️' if contract.contains_pii else 'No'} |\n"
         
         if contract.compliance_requirements:
-            doc += "- **Compliance Requirements:**\n"
-            for req in contract.compliance_requirements:
-                doc += f"  - {req}\n"
+            doc += f"| **Compliance** | {', '.join(contract.compliance_requirements)} |\n"
         
         if contract.registered_consumers:
             doc += "\n---\n\n## Registered Consumers\n\n"
             for consumer in contract.registered_consumers:
                 doc += f"- {consumer}\n"
         
+        if contract.downstream_tables:
+            doc += "\n---\n\n## Downstream Dependencies\n\n"
+            for table in contract.downstream_tables:
+                doc += f"- `{table}`\n"
+        
         doc += f"\n---\n\n## Change History\n\n"
         doc += "| Date | Action | User | Details |\n"
         doc += "|------|--------|------|----------|\n"
         
-        for log in reversed(contract.change_log[-5:]):
-            date = log['timestamp'].strftime('%Y-%m-%d')
-            doc += f"| {date} | {log['action']} | {log['user']} | {log['details']} |\n"
+        for log in reversed(contract.change_log[-10:]):
+            date = log['timestamp'].strftime('%Y-%m-%d %H:%M')
+            details = CodeGenerationEngine._escape_sql_string(log.get('details', ''))[:50]
+            doc += f"| {date} | {log['action']} | {log['user']} | {details} |\n"
         
-        doc += f"\n---\n\n*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n"
+        doc += f"\n---\n\n*Document generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n"
         
         return doc
     
@@ -1433,93 +2113,153 @@ ALTER TABLE {catalog}.{schema}.{table_name} SET TBLPROPERTIES (
     def generate_databricks_notebook(contract: DataContract) -> str:
         """Generate complete Databricks notebook with all artifacts"""
         
-        notebook = f"""# Databricks notebook source
+        table_name_safe = contract.table_name.replace("-", "_").replace(" ", "_")
+        
+        # Pre-generate the components
+        ddl_code = CodeGenerationEngine.generate_databricks_ddl(contract)
+        schema_code = CodeGenerationEngine.generate_pyspark_schema(contract)
+        quality_code = CodeGenerationEngine._generate_pyspark_tests(contract)
+        unity_code = CodeGenerationEngine.generate_unity_catalog_sql(contract)
+        
+        # Escape for embedding in notebook
+        ddl_escaped = ddl_code.replace('"""', '\\"\\"\\"')
+        unity_escaped = unity_code.replace('"""', '\\"\\"\\"')
+        
+        notebook = f'''# Databricks notebook source
 # MAGIC %md
 # MAGIC # Data Contract Implementation: {contract.table_name}
 # MAGIC 
-# MAGIC **Contract ID:** {contract.id}  
-# MAGIC **Version:** {contract.version}  
-# MAGIC **Owner:** {contract.owner}  
-# MAGIC **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+# MAGIC | Attribute | Value |
+# MAGIC |-----------|-------|
+# MAGIC | **Contract ID** | `{contract.id}` |
+# MAGIC | **Version** | {contract.version} |
+# MAGIC | **Owner** | {contract.owner} |
+# MAGIC | **Classification** | {contract.classification} |
+# MAGIC | **Generated** | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |
+# MAGIC 
+# MAGIC ---
+# MAGIC 
+# MAGIC ## Business Purpose
+# MAGIC {contract.business_purpose}
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Step 1: Create Delta Table
+# MAGIC 
+# MAGIC Execute the DDL to create the table with contract metadata.
 
 # COMMAND ----------
 
 # DDL for table creation
-ddl = \"\"\"
-{CodeGenerationEngine.generate_databricks_ddl(contract)}
-\"\"\"
+ddl = """
+{ddl_escaped}
+"""
 
-spark.sql(ddl)
-print(f"✅ Table {{contract.table_name}} created successfully")
+# Parse and execute DDL statements
+for statement in ddl.split(';'):
+    statement = statement.strip()
+    if statement and not statement.startswith('--'):
+        try:
+            spark.sql(statement)
+            print(f"✅ Executed: {{statement[:80]}}...")
+        except Exception as e:
+            print(f"⚠️ Skipped: {{statement[:80]}}... ({{str(e)[:50]}})")
+
+print("\\n✅ Table creation complete")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Step 2: Define PySpark Schema
+# MAGIC 
+# MAGIC Schema definition for programmatic use.
 
 # COMMAND ----------
 
-{CodeGenerationEngine.generate_pyspark_schema(contract)}
+{schema_code}
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 3: Data Quality Validation
+# MAGIC ## Step 3: Data Quality Validation Framework
+# MAGIC 
+# MAGIC Comprehensive data quality checks based on contract rules.
+# MAGIC 
+# MAGIC **Quality Rules Configured:** {len(contract.quality_rules)}
 
 # COMMAND ----------
 
-{CodeGenerationEngine._generate_pyspark_tests(contract)}
+{quality_code}
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Step 4: Unity Catalog Registration
+# MAGIC 
+# MAGIC Apply governance metadata and permissions.
 
 # COMMAND ----------
 
-unity_sql = \"\"\"
-{CodeGenerationEngine.generate_unity_catalog_sql(contract)}
-\"\"\"
+unity_sql = """
+{unity_escaped}
+"""
 
 # Execute Unity Catalog commands
 for statement in unity_sql.split(';'):
-    if statement.strip():
-        spark.sql(statement)
+    statement = statement.strip()
+    if statement and not statement.startswith('--'):
+        try:
+            spark.sql(statement)
+            print(f"✅ Executed: {{statement[:60]}}...")
+        except Exception as e:
+            # Some commands may fail if objects don't exist yet
+            print(f"⚠️ Skipped: {{statement[:60]}}... ({{str(e)[:50]}})")
 
-print("✅ Unity Catalog registration complete")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Step 5: Load and Validate Sample Data
-
-# COMMAND ----------
-
-# Load table
-df = spark.table("{contract.table_fqn}")
-
-# Run validation
-validation_results = validate_{contract.table_name}(df)
-
-# Display results
-import json
-print(json.dumps(validation_results, indent=2))
+print("\\n✅ Unity Catalog registration complete")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Metadata
+# MAGIC ## Step 5: Validate Data (Run After Loading Data)
 # MAGIC 
-# MAGIC - **Business Purpose:** {contract.business_purpose}
-# MAGIC - **Classification:** {contract.classification}
-# MAGIC - **Contains PII:** {contract.contains_pii}
-# MAGIC - **SLA Freshness:** {contract.sla_requirements.get('freshness_hours', 24)} hours
-"""
+# MAGIC Execute this cell after data has been loaded to validate against the contract.
+
+# COMMAND ----------
+
+# Load table and run validation
+try:
+    df = spark.table("{contract.table_fqn}")
+    print(f"Loaded {{df.count():,}} rows from {contract.table_fqn}")
+    
+    # Run validation
+    results = validate_{table_name_safe}(df)
+    
+    # Store results for downstream use
+    validation_passed = results["summary"]["failed"] == 0
+    
+    if not validation_passed:
+        print("\\n⚠️ Data quality issues detected - review failed checks above")
+    else:
+        print("\\n✅ All data quality checks passed!")
+        
+except Exception as e:
+    print(f"❌ Error: {{e}}")
+    print("Note: Table may not exist yet or may be empty")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Contract Metadata Summary
+# MAGIC 
+# MAGIC | Property | Value |
+# MAGIC |----------|-------|
+# MAGIC | **Business Purpose** | {contract.business_purpose[:100]}{'...' if len(contract.business_purpose) > 100 else ''} |
+# MAGIC | **Classification** | {contract.classification} |
+# MAGIC | **Contains PII** | {'Yes ⚠️' if contract.contains_pii else 'No'} |
+# MAGIC | **SLA Freshness** | {contract.sla_requirements.get('freshness_hours', 24)} hours |
+# MAGIC | **Quality Rules** | {len(contract.quality_rules)} configured |
+'''
         
         return notebook
 
@@ -2395,10 +3135,147 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
         
         st.info(f"**Selected:** {selected_table.get('name')} with {len(selected_table.get('columns', []))} columns")
         
-        # Use existing table's columns
-        table_columns = selected_table.get("columns", [])
         table_name = selected_table.get("name")
         table_fqn = selected_fqn
+        
+        st.markdown("---")
+        
+        # Step 1b: Schema Customization for Existing Table
+        st.markdown("### Step 1b: Customize Schema")
+        st.markdown("Review and modify the schema from the existing table. You can add, edit, or remove columns.")
+        
+        # Initialize session state for existing table columns
+        # Reset if a different table is selected
+        if "existing_table_selected_fqn" not in st.session_state or st.session_state.existing_table_selected_fqn != selected_fqn:
+            st.session_state.existing_table_selected_fqn = selected_fqn
+            # Convert existing columns to editable format
+            st.session_state.existing_table_columns = []
+            for col in selected_table.get("columns", []):
+                is_pii = any("PII" in str(tag) for tag in col.get("tags", []))
+                st.session_state.existing_table_columns.append({
+                    "name": col.get("name", ""),
+                    "dataType": col.get("dataType", "VARCHAR(255)"),
+                    "nullable": col.get("constraint", "") != "NOT NULL",
+                    "primaryKey": "PRIMARY" in col.get("constraint", "").upper(),
+                    "isPII": is_pii,
+                    "description": col.get("description", "")
+                })
+            # Store original columns for reset functionality
+            st.session_state.existing_table_original_columns = [col.copy() for col in st.session_state.existing_table_columns]
+        
+        # Display existing columns with edit/delete capability
+        for idx, col in enumerate(st.session_state.existing_table_columns):
+            with st.expander(f"📝 Column {idx + 1}: {col['name']}", expanded=(idx == 0)):
+                col_col1, col_col2, col_col3 = st.columns(3)
+                
+                with col_col1:
+                    col_name = st.text_input(
+                        "Column Name *",
+                        value=col["name"],
+                        key=f"exist_col_name_{idx}"
+                    )
+                    col["name"] = col_name
+                
+                with col_col2:
+                    data_types = ["INTEGER", "BIGINT", "VARCHAR(255)", "STRING", "DECIMAL(10,2)", 
+                                  "DOUBLE", "FLOAT", "BOOLEAN", "DATE", "TIMESTAMP", "BINARY"]
+                    # Handle data types that might not be in our list
+                    current_type = col["dataType"]
+                    if current_type not in data_types:
+                        data_types.insert(0, current_type)
+                    
+                    data_type = st.selectbox(
+                        "Data Type *",
+                        data_types,
+                        index=data_types.index(current_type),
+                        key=f"exist_col_type_{idx}"
+                    )
+                    col["dataType"] = data_type
+                
+                with col_col3:
+                    nullable = st.checkbox("Nullable", value=col.get("nullable", True), key=f"exist_col_null_{idx}")
+                    col["nullable"] = nullable
+                
+                # New row for Primary Key, PII, and Remove button
+                col_col4, col_col5, col_col6 = st.columns(3)
+                
+                with col_col4:
+                    primary_key = st.checkbox("Primary Key", value=col.get("primaryKey", False), key=f"exist_col_pk_{idx}")
+                    col["primaryKey"] = primary_key
+                    # Auto-set nullable to False if primary key is checked
+                    if primary_key:
+                        col["nullable"] = False
+                
+                with col_col5:
+                    is_pii = st.checkbox("Contains PII", value=col.get("isPII", False), key=f"exist_col_pii_{idx}")
+                    col["isPII"] = is_pii
+                
+                with col_col6:
+                    if st.button("🗑️ Remove Column", key=f"exist_remove_col_{idx}"):
+                        if len(st.session_state.existing_table_columns) > 1:
+                            st.session_state.existing_table_columns.pop(idx)
+                            st.rerun()
+                        else:
+                            st.error("Cannot remove the last column")
+                
+                description = st.text_area(
+                    "Column Description",
+                    value=col.get("description", ""),
+                    key=f"exist_col_desc_{idx}",
+                    height=80
+                )
+                col["description"] = description
+        
+        # Add new column button and Reset button
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+        
+        with col_btn1:
+            if st.button("➕ Add Column", key="exist_add_col", use_container_width=True):
+                st.session_state.existing_table_columns.append({
+                    "name": f"new_column_{len(st.session_state.existing_table_columns) + 1}",
+                    "dataType": "VARCHAR(255)",
+                    "nullable": True,
+                    "primaryKey": False,
+                    "isPII": False,
+                    "description": ""
+                })
+                st.rerun()
+        
+        with col_btn2:
+            if st.button("🔄 Reset to Original", key="exist_reset_cols", use_container_width=True):
+                st.session_state.existing_table_columns = [col.copy() for col in st.session_state.existing_table_original_columns]
+                st.rerun()
+        
+        # Show column count and modification status
+        original_count = len(st.session_state.existing_table_original_columns)
+        current_count = len(st.session_state.existing_table_columns)
+        
+        if current_count != original_count:
+            st.info(f"**Total Columns:** {current_count} (Original: {original_count}) - *Schema modified*")
+        else:
+            st.info(f"**Total Columns:** {current_count}")
+        
+        # Use the modified columns for the contract
+        table_columns = st.session_state.existing_table_columns
+        
+        # Update selected_table with modified columns for consistency
+        selected_table = {
+            "name": table_name,
+            "fullyQualifiedName": table_fqn,
+            "columns": [
+                {
+                    "name": col["name"],
+                    "dataType": col["dataType"],
+                    "constraint": "" if col["nullable"] else "NOT NULL",
+                    "description": col.get("description", ""),
+                    "tags": [{"tagFQN": "PII"}] if col["isPII"] else []
+                }
+                for col in table_columns
+            ],
+            "owner": selected_table.get("owner", {}),
+            "description": selected_table.get("description", ""),
+            "tags": selected_table.get("tags", [])
+        }
         
     # ========== MODE 2: NEW TABLE FROM SCRATCH ==========
     else:
@@ -2588,32 +3465,360 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
     
     st.markdown("---")
     
-    # Step 3: Quality Rules
-    st.markdown("### Step 3: Quality Rules")
+    # Step 3: Column-Level Data Quality Rules
+    st.markdown("### Step 3: Data Quality Rules")
+    st.markdown("Define quality expectations at the column level for precise data validation.")
     
-    st.markdown("Define quality expectations for this dataset")
+    # Get column list from the selected/designed table
+    column_list = [col["name"] for col in selected_table.get("columns", [])]
+    column_types = {col["name"]: col.get("dataType", "STRING") for col in selected_table.get("columns", [])}
     
-    num_rules = st.number_input("Number of quality rules", min_value=0, max_value=10, value=2)
+    # Define available DQ rules by data type category
+    NUMERIC_TYPES = ["INTEGER", "BIGINT", "DECIMAL(10,2)", "DOUBLE", "FLOAT"]
+    STRING_TYPES = ["VARCHAR(255)", "STRING"]
+    DATE_TYPES = ["DATE", "TIMESTAMP"]
     
+    # Rule definitions with metadata
+    DQ_RULE_DEFINITIONS = {
+        "null_check": {
+            "label": "🚫 Null Check",
+            "description": "Ensure column values are not null",
+            "applies_to": "all",
+            "config": ["threshold"]
+        },
+        "uniqueness": {
+            "label": "🔑 Uniqueness",
+            "description": "Ensure column values are unique",
+            "applies_to": "all",
+            "config": ["threshold"]
+        },
+        "range_check": {
+            "label": "📏 Range Check",
+            "description": "Validate values within min/max range",
+            "applies_to": ["numeric", "date"],
+            "config": ["min_value", "max_value"]
+        },
+        "format_check": {
+            "label": "📝 Format Check",
+            "description": "Validate format using pattern/regex",
+            "applies_to": ["string"],
+            "config": ["pattern_type", "custom_regex"]
+        },
+        "length_check": {
+            "label": "📐 Length Check",
+            "description": "Validate string length constraints",
+            "applies_to": ["string"],
+            "config": ["min_length", "max_length"]
+        },
+        "allowed_values": {
+            "label": "📋 Allowed Values",
+            "description": "Restrict to specific valid values",
+            "applies_to": "all",
+            "config": ["values_list"]
+        },
+        "freshness_check": {
+            "label": "⏰ Freshness Check",
+            "description": "Ensure date/time is within acceptable age",
+            "applies_to": ["date"],
+            "config": ["max_age_hours"]
+        }
+    }
+    
+    # Format patterns for string validation
+    FORMAT_PATTERNS = {
+        "email": r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$",
+        "phone": r"^\+?[1-9]\d{1,14}$",
+        "url": r"^https?://[^\s]+$",
+        "uuid": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        "date_iso": r"^\d{4}-\d{2}-\d{2}$",
+        "alphanumeric": r"^[a-zA-Z0-9]+$",
+        "custom": None
+    }
+    
+    def get_data_type_category(data_type: str) -> str:
+        """Categorize data type for rule applicability"""
+        if any(t in data_type.upper() for t in ["INT", "DECIMAL", "DOUBLE", "FLOAT", "NUMERIC"]):
+            return "numeric"
+        elif any(t in data_type.upper() for t in ["DATE", "TIME"]):
+            return "date"
+        else:
+            return "string"
+    
+    def get_applicable_rules(data_type: str, is_primary_key: bool = False) -> List[str]:
+        """Get applicable DQ rules based on data type"""
+        category = get_data_type_category(data_type)
+        applicable = []
+        
+        for rule_id, rule_def in DQ_RULE_DEFINITIONS.items():
+            applies_to = rule_def["applies_to"]
+            if applies_to == "all" or category in applies_to:
+                applicable.append(rule_id)
+        
+        return applicable
+    
+    # Initialize session state for column DQ rules
+    if "column_dq_rules" not in st.session_state:
+        st.session_state.column_dq_rules = {}
+    
+    # Check if we need to reset rules (different table selected)
+    current_table_id = selected_table.get("fullyQualifiedName", table_name)
+    if "dq_rules_table_id" not in st.session_state or st.session_state.dq_rules_table_id != current_table_id:
+        st.session_state.dq_rules_table_id = current_table_id
+        st.session_state.column_dq_rules = {}
+    
+    # Two-column layout for rule configuration
+    rule_config_col, rule_summary_col = st.columns([1, 1])
+    
+    with rule_config_col:
+        st.markdown("#### ➕ Add Quality Rules")
+        
+        # Column selection
+        if column_list:
+            selected_column = st.selectbox(
+                "Select Column",
+                options=column_list,
+                help="Choose a column to add quality rules",
+                key="dq_column_select"
+            )
+            
+            if selected_column:
+                col_data_type = column_types.get(selected_column, "STRING")
+                st.caption(f"Data Type: `{col_data_type}`")
+                
+                # Get applicable rules for this column's data type
+                applicable_rules = get_applicable_rules(col_data_type)
+                
+                # Multi-select for rules
+                rule_options = {rule_id: DQ_RULE_DEFINITIONS[rule_id]["label"] 
+                              for rule_id in applicable_rules}
+                
+                selected_rules = st.multiselect(
+                    "Select Quality Rules",
+                    options=list(rule_options.keys()),
+                    format_func=lambda x: rule_options[x],
+                    help="Select one or more quality rules to apply",
+                    key="dq_rule_multiselect"
+                )
+                
+                # Configuration for each selected rule
+                if selected_rules:
+                    st.markdown("##### Configure Rules")
+                    
+                    rule_configs = {}
+                    
+                    for rule_id in selected_rules:
+                        rule_def = DQ_RULE_DEFINITIONS[rule_id]
+                        
+                        with st.expander(f"{rule_def['label']}", expanded=True):
+                            st.caption(rule_def["description"])
+                            
+                            config = {"type": rule_id, "column": selected_column}
+                            
+                            # Threshold-based rules
+                            if "threshold" in rule_def["config"]:
+                                threshold = st.slider(
+                                    "Threshold (%)",
+                                    min_value=0,
+                                    max_value=100,
+                                    value=95,
+                                    help="Percentage of rows that must pass this check",
+                                    key=f"config_threshold_{rule_id}"
+                                )
+                                config["threshold"] = threshold / 100
+                            
+                            # Range check config
+                            if "min_value" in rule_def["config"]:
+                                range_col1, range_col2 = st.columns(2)
+                                with range_col1:
+                                    if get_data_type_category(col_data_type) == "date":
+                                        min_val = st.date_input("Min Date", key=f"config_min_{rule_id}")
+                                        config["min_value"] = str(min_val)
+                                    else:
+                                        min_val = st.number_input("Min Value", value=0, key=f"config_min_{rule_id}")
+                                        config["min_value"] = min_val
+                                with range_col2:
+                                    if get_data_type_category(col_data_type) == "date":
+                                        max_val = st.date_input("Max Date", key=f"config_max_{rule_id}")
+                                        config["max_value"] = str(max_val)
+                                    else:
+                                        max_val = st.number_input("Max Value", value=100, key=f"config_max_{rule_id}")
+                                        config["max_value"] = max_val
+                            
+                            # Format check config
+                            if "pattern_type" in rule_def["config"]:
+                                pattern_type = st.selectbox(
+                                    "Pattern Type",
+                                    options=list(FORMAT_PATTERNS.keys()),
+                                    format_func=lambda x: x.replace("_", " ").title(),
+                                    key=f"config_pattern_{rule_id}"
+                                )
+                                config["pattern_type"] = pattern_type
+                                
+                                if pattern_type == "custom":
+                                    custom_regex = st.text_input(
+                                        "Custom Regex Pattern",
+                                        help="Enter a valid regex pattern",
+                                        key=f"config_regex_{rule_id}"
+                                    )
+                                    config["custom_regex"] = custom_regex
+                                else:
+                                    config["regex"] = FORMAT_PATTERNS[pattern_type]
+                            
+                            # Length check config
+                            if "min_length" in rule_def["config"]:
+                                len_col1, len_col2 = st.columns(2)
+                                with len_col1:
+                                    min_len = st.number_input("Min Length", value=0, min_value=0, key=f"config_minlen_{rule_id}")
+                                    config["min_length"] = min_len
+                                with len_col2:
+                                    max_len = st.number_input("Max Length", value=255, min_value=1, key=f"config_maxlen_{rule_id}")
+                                    config["max_length"] = max_len
+                            
+                            # Allowed values config
+                            if "values_list" in rule_def["config"]:
+                                values_input = st.text_area(
+                                    "Allowed Values (one per line)",
+                                    help="Enter each allowed value on a separate line",
+                                    key=f"config_values_{rule_id}",
+                                    height=100
+                                )
+                                config["allowed_values"] = [v.strip() for v in values_input.split("\n") if v.strip()]
+                            
+                            # Freshness check config
+                            if "max_age_hours" in rule_def["config"]:
+                                max_age = st.number_input(
+                                    "Max Age (hours)",
+                                    value=24,
+                                    min_value=1,
+                                    help="Maximum age of data in hours",
+                                    key=f"config_freshness_{rule_id}"
+                                )
+                                config["max_age_hours"] = max_age
+                            
+                            rule_configs[rule_id] = config
+                    
+                    # Add rules button
+                    if st.button("✅ Add Rules to Column", type="primary", use_container_width=True):
+                        if selected_column not in st.session_state.column_dq_rules:
+                            st.session_state.column_dq_rules[selected_column] = []
+                        
+                        # Add each configured rule
+                        for rule_id, config in rule_configs.items():
+                            # Check if rule already exists for this column
+                            existing_rules = [r["type"] for r in st.session_state.column_dq_rules[selected_column]]
+                            if rule_id not in existing_rules:
+                                st.session_state.column_dq_rules[selected_column].append(config)
+                            else:
+                                # Update existing rule
+                                for i, r in enumerate(st.session_state.column_dq_rules[selected_column]):
+                                    if r["type"] == rule_id:
+                                        st.session_state.column_dq_rules[selected_column][i] = config
+                                        break
+                        
+                        st.success(f"✅ Added {len(rule_configs)} rule(s) to '{selected_column}'")
+                        st.rerun()
+        else:
+            st.warning("No columns available. Please define schema first.")
+    
+    with rule_summary_col:
+        st.markdown("#### 📋 Configured Rules Summary")
+        
+        if st.session_state.column_dq_rules:
+            # Build summary data
+            summary_data = []
+            for col_name, rules in st.session_state.column_dq_rules.items():
+                for rule in rules:
+                    rule_label = DQ_RULE_DEFINITIONS.get(rule["type"], {}).get("label", rule["type"])
+                    
+                    # Build config summary
+                    config_parts = []
+                    if "threshold" in rule:
+                        config_parts.append(f"{int(rule['threshold']*100)}% threshold")
+                    if "min_value" in rule:
+                        config_parts.append(f"min: {rule['min_value']}")
+                    if "max_value" in rule:
+                        config_parts.append(f"max: {rule['max_value']}")
+                    if "pattern_type" in rule:
+                        config_parts.append(f"pattern: {rule['pattern_type']}")
+                    if "min_length" in rule:
+                        config_parts.append(f"len: {rule['min_length']}-{rule.get('max_length', '∞')}")
+                    if "max_age_hours" in rule:
+                        config_parts.append(f"max age: {rule['max_age_hours']}h")
+                    if "allowed_values" in rule and rule["allowed_values"]:
+                        config_parts.append(f"{len(rule['allowed_values'])} values")
+                    
+                    summary_data.append({
+                        "Column": col_name,
+                        "Rule": rule_label,
+                        "Configuration": ", ".join(config_parts) if config_parts else "Default"
+                    })
+            
+            if summary_data:
+                summary_df = pd.DataFrame(summary_data)
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                
+                # Rule management
+                st.markdown("##### 🔧 Manage Rules")
+                
+                # Select rule to remove
+                columns_with_rules = list(st.session_state.column_dq_rules.keys())
+                if columns_with_rules:
+                    remove_col = st.selectbox(
+                        "Select Column",
+                        options=columns_with_rules,
+                        key="remove_rule_col"
+                    )
+                    
+                    if remove_col and st.session_state.column_dq_rules.get(remove_col):
+                        rules_for_col = st.session_state.column_dq_rules[remove_col]
+                        rule_labels = [DQ_RULE_DEFINITIONS.get(r["type"], {}).get("label", r["type"]) 
+                                      for r in rules_for_col]
+                        
+                        remove_rule_idx = st.selectbox(
+                            "Select Rule to Remove",
+                            options=range(len(rules_for_col)),
+                            format_func=lambda x: rule_labels[x],
+                            key="remove_rule_select"
+                        )
+                        
+                        col_rm1, col_rm2 = st.columns(2)
+                        with col_rm1:
+                            if st.button("🗑️ Remove Rule", use_container_width=True):
+                                st.session_state.column_dq_rules[remove_col].pop(remove_rule_idx)
+                                # Clean up empty columns
+                                if not st.session_state.column_dq_rules[remove_col]:
+                                    del st.session_state.column_dq_rules[remove_col]
+                                st.success("Rule removed!")
+                                st.rerun()
+                        
+                        with col_rm2:
+                            if st.button("🗑️ Clear All Rules", use_container_width=True):
+                                st.session_state.column_dq_rules = {}
+                                st.success("All rules cleared!")
+                                st.rerun()
+                
+                # Show total rule count
+                total_rules = sum(len(rules) for rules in st.session_state.column_dq_rules.values())
+                columns_covered = len(st.session_state.column_dq_rules)
+                st.info(f"**Total:** {total_rules} rule(s) across {columns_covered} column(s)")
+        else:
+            st.info("No quality rules configured yet. Select a column and add rules from the left panel.")
+            
+            # Quick start suggestions
+            st.markdown("##### 💡 Quick Start Suggestions")
+            st.caption("Consider adding these common rules:")
+            st.markdown("""
+            - **Primary Key columns**: Uniqueness + Null Check (100%)
+            - **Email fields**: Format Check (email pattern)
+            - **Date columns**: Freshness + Range Check
+            - **Required fields**: Null Check (95-100%)
+            """)
+    
+    # Convert session state rules to the format expected by contract creation
     quality_rules = []
-    for i in range(num_rules):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            rule_type = st.selectbox(f"Rule {i+1} Type",
-                                    ["null_check", "unique_check", "range_check", 
-                                     "format_check", "completeness_check"],
-                                    key=f"rule_type_{i}")
-        
-        with col2:
-            if rule_type in ["null_check", "completeness_check"]:
-                threshold = st.slider(f"Threshold", 0.0, 1.0, 0.95, 0.05, key=f"threshold_{i}")
-                quality_rules.append({"type": rule_type, "threshold": threshold})
-            elif rule_type == "unique_check":
-                column = st.selectbox("Column", 
-                                    [col["name"] for col in selected_table.get("columns", [])],
-                                    key=f"column_{i}")
-                quality_rules.append({"type": rule_type, "column": column})
+    for col_name, rules in st.session_state.column_dq_rules.items():
+        for rule in rules:
+            quality_rules.append(rule)
     
     st.markdown("---")
     
@@ -2642,6 +3847,21 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                 # Clear new table columns from session state if in new table mode
                 if creation_mode == "✨ Design New Table from Scratch" and "new_table_columns" in st.session_state:
                     del st.session_state.new_table_columns
+                
+                # Clear existing table columns from session state if in existing table mode
+                if creation_mode == "📊 From Existing Table":
+                    if "existing_table_columns" in st.session_state:
+                        del st.session_state.existing_table_columns
+                    if "existing_table_original_columns" in st.session_state:
+                        del st.session_state.existing_table_original_columns
+                    if "existing_table_selected_fqn" in st.session_state:
+                        del st.session_state.existing_table_selected_fqn
+                
+                # Clear column-level DQ rules from session state
+                if "column_dq_rules" in st.session_state:
+                    del st.session_state.column_dq_rules
+                if "dq_rules_table_id" in st.session_state:
+                    del st.session_state.dq_rules_table_id
                 
                 st.success(f"✅ Contract created successfully for {selected_table.get('name')}!")
                 
