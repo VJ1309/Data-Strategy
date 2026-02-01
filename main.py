@@ -28,8 +28,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Allowed databases only
-ALLOWED_DATABASES = ["Deliver", "Plan", "Procurement", "Make", "Quality", "Masterdata"]
+# Allowed domains (supply chain areas)
+ALLOWED_DOMAINS = ["Deliver", "Plan", "Procurement", "Make", "Quality", "Masterdata"]
+
+# Data Assets by Domain (only Deliver has data assets for this prototype)
+DATA_ASSETS = {
+    "Deliver": ["Delivery", "Transportation", "Sales Order", "Shipment"],
+    "Plan": [],
+    "Procurement": [],
+    "Make": [],
+    "Quality": [],
+    "Masterdata": []
+}
+
+# Data Asset to Database mapping (1:1)
+DATA_ASSET_DATABASE_MAPPING = {
+    "Delivery": "SC_Core",
+    "Transportation": "SC_Core",
+    "Sales Order": "SC_Core",
+    "Shipment": "SC_Core"
+}
+
+# Allowed databases
+ALLOWED_DATABASES = ["SC_Core", "SCRU_IM", "SCRU_EM"]
 
 # Data classification levels
 DATA_CLASSIFICATIONS = {
@@ -199,7 +220,9 @@ class DataContract:
     id: str
     table_fqn: str
     table_name: str
-    database: str
+    domain: str  # Supply chain area: Deliver, Plan, Make, etc.
+    data_asset: str  # Data asset within domain: Delivery, Transportation, etc.
+    database: str  # Physical database: SC_Core, SCRU_IM, SCRU_EM
     version: str
     status: str  # draft, review, active, deprecated
     owner: str
@@ -227,6 +250,7 @@ class DataContract:
     
     # Compliance
     retention_days: Optional[int] = None
+    data_history_years: int = 2  # Number of years to retain data
     contains_pii: bool = False
     compliance_requirements: List[str] = field(default_factory=list)
     
@@ -282,7 +306,9 @@ class DataAsset:
     """Unified data asset representation"""
     fqn: str
     name: str
-    database: str
+    domain: str  # Supply chain area
+    data_asset: str  # Data asset within domain
+    database: str  # Physical database
     schema: str
     asset_type: str
     description: str
@@ -301,7 +327,9 @@ class DataTrustScore:
     """Comprehensive trust score for data assets"""
     fqn: str
     table_name: str
-    database: str
+    domain: str  # Supply chain area
+    data_asset: str  # Data asset within domain
+    database: str  # Physical database
     
     # Component scores (0-100)
     data_quality_score: float
@@ -380,7 +408,9 @@ class DataContractEngine:
     def create_contract(self, table: Dict, owner: str, classification: str,
                        description: str, business_purpose: str, 
                        quality_rules: List[Dict] = None,
-                       sla_hours: int = 24, contains_pii: bool = False) -> DataContract:
+                       sla_hours: int = 24, contains_pii: bool = False,
+                       domain: str = None, data_asset: str = None, database: str = None,
+                       data_history_years: int = 2) -> DataContract:
         """Create a new data contract"""
         fqn = table.get("fullyQualifiedName", "")
         columns = table.get("columns", [])
@@ -390,18 +420,26 @@ class DataContractEngine:
                 "dataType": col.get("dataType", "UNKNOWN"),
                 "nullable": col.get("constraint", "") != "NOT NULL",
                 "description": col.get("description", ""),
-                "isPII": "PII" in str(col.get("tags", []))
+                "isPII": "PII" in str(col.get("tags", [])),
+                "calculation": col.get("calculation", "")
             }
             for col in columns
         }
         
         contract_id = hashlib.md5(fqn.encode()).hexdigest()[:12]
         
+        # Extract domain, data_asset, and database from table metadata or use provided values
+        table_domain = domain or table.get("domain", ALLOWED_DOMAINS[0])
+        table_data_asset = data_asset or table.get("data_asset", "")
+        table_database = database or fqn.split(".")[0] if fqn else ALLOWED_DATABASES[0]
+        
         contract = DataContract(
             id=contract_id,
             table_fqn=fqn,
             table_name=table.get("name", ""),
-            database=fqn.split(".")[0],
+            domain=table_domain,
+            data_asset=table_data_asset,
+            database=table_database,
             version="1.0.0",
             status="draft",
             owner=owner,
@@ -417,6 +455,7 @@ class DataContractEngine:
             registered_consumers=[],
             downstream_tables=[],
             contains_pii=contains_pii,
+            data_history_years=data_history_years,
             change_log=[{
                 "timestamp": datetime.now(),
                 "action": "created",
@@ -614,15 +653,15 @@ class GovernanceEngine:
             "tables": 0,
             "documented": 0,
             "with_contracts": 0,
-            "databases": set()
+            "domains": set()
         })
         
         for table in tables:
             owner = table.get("owner", {}).get("name", "Unassigned")
-            db = table.get("fullyQualifiedName", "").split(".")[0]
+            domain = table.get("domain", "Unknown")
             
             owner_stats[owner]["tables"] += 1
-            owner_stats[owner]["databases"].add(db)
+            owner_stats[owner]["domains"].add(domain)
             
             if table.get("description"):
                 owner_stats[owner]["documented"] += 1
@@ -634,7 +673,7 @@ class GovernanceEngine:
                 "Total Tables": stats["tables"],
                 "Documented": stats["documented"],
                 "Documentation %": f"{(stats['documented']/stats['tables']*100):.1f}%" if stats["tables"] > 0 else "0%",
-                "Databases": ", ".join(sorted(stats["databases"]))
+                "Domains": ", ".join(sorted(stats["domains"]))
             })
         
         return pd.DataFrame(report).sort_values("Total Tables", ascending=False)
@@ -1048,10 +1087,17 @@ class TrustScoreEngine:
                 classification = tag_fqn.split("Classification.")[-1].lower()
                 break
         
+        # Get domain, data_asset, and database
+        table_domain = table.get("domain", "Unknown")
+        table_data_asset = table.get("data_asset", "")
+        table_database = fqn.split(".")[0] if fqn else "Unknown"
+        
         return DataTrustScore(
             fqn=fqn,
             table_name=table.get("name", ""),
-            database=fqn.split(".")[0] if fqn else "Unknown",
+            domain=table_domain,
+            data_asset=table_data_asset,
+            database=table_database,
             data_quality_score=quality_score,
             contract_availability_score=contract_score,
             freshness_score=freshness_score,
@@ -1085,11 +1131,17 @@ class TrustScoreEngine:
         for ts in trust_scores:
             level_distribution[ts.trust_level] += 1
         
+        # Domain breakdown
+        domain_scores = defaultdict(list)
+        for ts in trust_scores:
+            domain_scores[ts.domain].append(ts.composite_trust_score)
+        
         # Database breakdown
         db_scores = defaultdict(list)
         for ts in trust_scores:
             db_scores[ts.database].append(ts.composite_trust_score)
         
+        domain_averages = {d: sum(s)/len(s) for d, s in domain_scores.items()}
         db_averages = {db: sum(scores)/len(scores) for db, scores in db_scores.items()}
         
         return {
@@ -1099,6 +1151,7 @@ class TrustScoreEngine:
             "median_score": sorted(scores)[len(scores)//2],
             "total_assets": len(trust_scores),
             "level_distribution": dict(level_distribution),
+            "domain_averages": domain_averages,
             "database_averages": db_averages,
             "high_trust_assets": len([s for s in scores if s >= 75]),
             "needs_attention_assets": len([s for s in scores if s < 40])
@@ -2279,10 +2332,21 @@ class MockDataGenerator:
         owners = ["alice.data", "bob.engineering", "carol.analytics", "dave.ops", "eve.finance"]
         
         tables = []
-        for i in range(count):
-            db = ALLOWED_DATABASES[i % len(ALLOWED_DATABASES)]
+        
+        # Focus on Deliver domain (about 40 tables), rest for other domains (about 20 tables)
+        deliver_count = int(count * 0.67)  # ~40 tables for Deliver
+        other_count = count - deliver_count  # ~20 tables for other domains
+        
+        deliver_assets = DATA_ASSETS.get("Deliver", [])
+        other_domains = [d for d in ALLOWED_DOMAINS if d != "Deliver"]
+        
+        # Generate Deliver domain tables with data assets
+        for i in range(deliver_count):
+            domain = "Deliver"
+            data_asset = deliver_assets[i % len(deliver_assets)] if deliver_assets else ""
+            database = DATA_ASSET_DATABASE_MAPPING.get(data_asset, ALLOWED_DATABASES[0])
             schema = schemas[i % len(schemas)]
-            table_name = f"table_{db.lower()}_{i:03d}"
+            table_name = f"table_{domain.lower()}_{i:03d}"
             
             num_columns = 5 + (i % 10)
             columns = []
@@ -2304,14 +2368,57 @@ class MockDataGenerator:
             tables.append({
                 "id": f"table-{i}",
                 "name": table_name,
-                "fullyQualifiedName": f"{db}.{schema}.{table_name}",
+                "fullyQualifiedName": f"{database}.{schema}.{table_name}",
                 "tableType": "Regular",
                 "columns": columns,
                 "owner": {"name": owners[i % len(owners)]} if i % 4 != 0 else {},
                 "tags": [{"tagFQN": f"Classification.{classification}"}] if classification else [],
                 "updatedAt": int((datetime.now() - timedelta(hours=i % 48)).timestamp() * 1000),
-                "description": f"This table contains {db} data for {schema} layer" if i % 3 == 0 else "",
-                "rowCount": random.randint(1000, 1000000)
+                "description": f"This table contains {domain} - {data_asset} data for {schema} layer" if i % 3 == 0 else "",
+                "rowCount": random.randint(1000, 1000000),
+                "domain": domain,
+                "data_asset": data_asset
+            })
+        
+        # Generate tables for other domains (without data assets)
+        for i in range(other_count):
+            idx = deliver_count + i
+            domain = other_domains[i % len(other_domains)]
+            data_asset = ""  # No data assets for other domains yet
+            database = ALLOWED_DATABASES[i % len(ALLOWED_DATABASES)]
+            schema = schemas[i % len(schemas)]
+            table_name = f"table_{domain.lower()}_{idx:03d}"
+            
+            num_columns = 5 + (i % 10)
+            columns = []
+            for j in range(num_columns):
+                col_type = ["VARCHAR", "INTEGER", "DECIMAL", "DATE", "TIMESTAMP", "BOOLEAN"][j % 6]
+                is_pii = (j % 7 == 0)
+                
+                columns.append({
+                    "name": f"col_{j}",
+                    "dataType": col_type,
+                    "constraint": "NOT NULL" if j == 0 else "",
+                    "description": f"Column {j} - {col_type} field" if i % 3 == 0 else "",
+                    "tags": [{"tagFQN": "PII"}] if is_pii else []
+                })
+            
+            has_pii = any("PII" in str(col.get("tags", [])) for col in columns)
+            classification = random.choice(["public", "internal", "confidential"]) if i % 2 == 0 else None
+            
+            tables.append({
+                "id": f"table-{idx}",
+                "name": table_name,
+                "fullyQualifiedName": f"{database}.{schema}.{table_name}",
+                "tableType": "Regular",
+                "columns": columns,
+                "owner": {"name": owners[i % len(owners)]} if i % 4 != 0 else {},
+                "tags": [{"tagFQN": f"Classification.{classification}"}] if classification else [],
+                "updatedAt": int((datetime.now() - timedelta(hours=i % 48)).timestamp() * 1000),
+                "description": f"This table contains {domain} data for {schema} layer" if i % 3 == 0 else "",
+                "rowCount": random.randint(1000, 1000000),
+                "domain": domain,
+                "data_asset": data_asset
             })
         
         return tables
@@ -2329,22 +2436,34 @@ class MockDataGenerator:
         for table in eligible_tables:
             owner = table.get("owner", {}).get("name", "unknown")
             fqn = table.get("fullyQualifiedName", "")
+            domain = table.get("domain", ALLOWED_DOMAINS[0])
+            data_asset = table.get("data_asset", "")
+            database = fqn.split(".")[0] if fqn else ALLOWED_DATABASES[0]
             
             has_pii = any("PII" in str(col.get("tags", [])) for col in table.get("columns", []))
             classification = random.choice(["internal", "confidential"]) if has_pii else random.choice(["public", "internal"])
+            
+            # Business purpose includes data asset if available
+            if data_asset:
+                purpose = f"Supports {domain} - {data_asset} business operations"
+            else:
+                purpose = f"Supports {domain} business operations"
             
             contract = contract_engine.create_contract(
                 table=table,
                 owner=owner,
                 classification=classification,
                 description=f"Production contract for {table.get('name')}",
-                business_purpose=f"Supports {fqn.split('.')[0]} business operations",
+                business_purpose=purpose,
                 quality_rules=[
                     {"type": "null_check", "threshold": 0.95},
                     {"type": "unique_check", "column": "col_0"}
                 ],
                 sla_hours=24,
-                contains_pii=has_pii
+                contains_pii=has_pii,
+                domain=domain,
+                data_asset=data_asset,
+                database=database
             )
             
             # Set some contracts to active
@@ -2458,29 +2577,29 @@ def render_governance_dashboard(tables: List[Dict], contracts: Dict[str, DataCon
     
     st.markdown("---")
     
-    # Governance health by database
+    # Governance health by domain
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("📊 Governance Coverage by Database")
+        st.subheader("📊 Governance Coverage by Domain")
         
-        db_coverage = defaultdict(lambda: {"total": 0, "owned": 0, "documented": 0, "contracted": 0})
+        domain_coverage = defaultdict(lambda: {"total": 0, "owned": 0, "documented": 0, "contracted": 0})
         
         for table in tables:
-            db = table.get("fullyQualifiedName", "").split(".")[0]
-            if db in ALLOWED_DATABASES:
-                db_coverage[db]["total"] += 1
+            domain = table.get("domain", "Unknown")
+            if domain in ALLOWED_DOMAINS:
+                domain_coverage[domain]["total"] += 1
                 if table.get("owner", {}).get("name"):
-                    db_coverage[db]["owned"] += 1
+                    domain_coverage[domain]["owned"] += 1
                 if table.get("description"):
-                    db_coverage[db]["documented"] += 1
+                    domain_coverage[domain]["documented"] += 1
                 if table.get("fullyQualifiedName") in contracts:
-                    db_coverage[db]["contracted"] += 1
+                    domain_coverage[domain]["contracted"] += 1
         
         coverage_data = []
-        for db, stats in db_coverage.items():
+        for domain, stats in domain_coverage.items():
             coverage_data.append({
-                "Database": db,
+                "Domain": domain,
                 "Ownership %": (stats["owned"] / stats["total"] * 100) if stats["total"] > 0 else 0,
                 "Documentation %": (stats["documented"] / stats["total"] * 100) if stats["total"] > 0 else 0,
                 "Contract %": (stats["contracted"] / stats["total"] * 100) if stats["total"] > 0 else 0
@@ -2489,11 +2608,11 @@ def render_governance_dashboard(tables: List[Dict], contracts: Dict[str, DataCon
         df_coverage = pd.DataFrame(coverage_data)
         
         fig = go.Figure()
-        fig.add_trace(go.Bar(name="Ownership", x=df_coverage["Database"], 
+        fig.add_trace(go.Bar(name="Ownership", x=df_coverage["Domain"], 
                             y=df_coverage["Ownership %"], marker_color="#667eea"))
-        fig.add_trace(go.Bar(name="Documentation", x=df_coverage["Database"], 
+        fig.add_trace(go.Bar(name="Documentation", x=df_coverage["Domain"], 
                             y=df_coverage["Documentation %"], marker_color="#11998e"))
-        fig.add_trace(go.Bar(name="Contracts", x=df_coverage["Database"], 
+        fig.add_trace(go.Bar(name="Contracts", x=df_coverage["Domain"], 
                             y=df_coverage["Contract %"], marker_color="#f093fb"))
         
         fig.update_layout(barmode='group', height=350, yaxis_title="Coverage %",
@@ -2630,23 +2749,55 @@ def render_data_discovery(tables: List[Dict], contracts: Dict[str, DataContract]
                 unsafe_allow_html=True)
     st.markdown("---")
     
-    # Search interface
-    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+    # Search interface with cascading filters
+    col1, col2 = st.columns([3, 1])
     
     with col1:
         search_query = st.text_input("🔎 Search for tables, columns, or descriptions", 
                                     placeholder="e.g., customer, sales, revenue...")
     
     with col2:
-        db_filter = st.selectbox("Database", ["All"] + ALLOWED_DATABASES)
-    
-    with col3:
-        classification_filter = st.selectbox("Classification", 
-                                            ["All"] + list(DATA_CLASSIFICATIONS.keys()))
-    
-    with col4:
         contract_filter = st.selectbox("Contract Status", 
                                       ["All", "With Contract", "No Contract"])
+    
+    # Cascading filters row
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+    
+    with filter_col1:
+        domain_filter = st.selectbox("Domain", ["All"] + ALLOWED_DOMAINS, key="disc_domain")
+    
+    with filter_col2:
+        # Data Asset filter - cascades from Domain
+        if domain_filter != "All" and domain_filter in DATA_ASSETS:
+            available_assets = DATA_ASSETS.get(domain_filter, [])
+            if available_assets:
+                data_asset_filter = st.selectbox("Data Asset", ["All"] + available_assets, key="disc_data_asset")
+            else:
+                st.selectbox("Data Asset", ["N/A - No assets defined"], disabled=True, key="disc_data_asset_disabled")
+                data_asset_filter = "All"
+        else:
+            # When "All" domains selected, show all available data assets
+            all_assets = []
+            for assets in DATA_ASSETS.values():
+                all_assets.extend(assets)
+            if all_assets:
+                data_asset_filter = st.selectbox("Data Asset", ["All"] + sorted(set(all_assets)), key="disc_data_asset_all")
+            else:
+                st.selectbox("Data Asset", ["N/A"], disabled=True, key="disc_data_asset_none")
+                data_asset_filter = "All"
+    
+    with filter_col3:
+        # Database filter - cascades from Data Asset
+        if data_asset_filter != "All" and data_asset_filter in DATA_ASSET_DATABASE_MAPPING:
+            mapped_db = DATA_ASSET_DATABASE_MAPPING.get(data_asset_filter)
+            st.selectbox("Database", [mapped_db], disabled=True, key="disc_db_mapped")
+            db_filter = mapped_db
+        else:
+            db_filter = st.selectbox("Database", ["All"] + ALLOWED_DATABASES, key="disc_db")
+    
+    with filter_col4:
+        classification_filter = st.selectbox("Classification", 
+                                            ["All"] + list(DATA_CLASSIFICATIONS.keys()))
     
     # Advanced filters in expander
     with st.expander("🔧 Advanced Filters"):
@@ -2669,6 +2820,18 @@ def render_data_discovery(tables: List[Dict], contracts: Dict[str, DataContract]
                 search_query.lower() in t.get("description", "").lower() or
                 any(search_query.lower() in col.get("name", "").lower() 
                     for col in t.get("columns", [])))
+        ]
+    
+    if domain_filter != "All":
+        filtered_tables = [
+            t for t in filtered_tables
+            if t.get("domain", "") == domain_filter
+        ]
+    
+    if data_asset_filter != "All":
+        filtered_tables = [
+            t for t in filtered_tables
+            if t.get("data_asset", "") == data_asset_filter
         ]
     
     if db_filter != "All":
@@ -2709,8 +2872,8 @@ def render_data_discovery(tables: List[Dict], contracts: Dict[str, DataContract]
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            unique_dbs = len(set(t.get("fullyQualifiedName", "").split(".")[0] for t in filtered_tables))
-            st.metric("Databases", unique_dbs)
+            unique_domains = len(set(t.get("domain", "Unknown") for t in filtered_tables))
+            st.metric("Domains", unique_domains)
         
         with col2:
             with_contracts = sum(1 for t in filtered_tables if t.get("fullyQualifiedName") in contracts)
@@ -2731,12 +2894,20 @@ def render_data_discovery(tables: List[Dict], contracts: Dict[str, DataContract]
         for table in filtered_tables[:20]:  # Limit to 20 results
             fqn = table.get("fullyQualifiedName", "")
             has_contract = fqn in contracts
+            domain = table.get("domain", "Unknown")
+            data_asset = table.get("data_asset", "")
             
             with st.container():
+                # Build domain/asset display string
+                domain_display = f"Domain: {domain}"
+                if data_asset:
+                    domain_display += f" | Data Asset: {data_asset}"
+                
                 st.markdown(f"""
                     <div class="search-result">
                         <h3 style="margin: 0 0 0.5rem 0;">📊 {table.get('name', 'Unknown')}</h3>
                         <p style="color: #666; font-size: 0.9rem; margin: 0 0 0.5rem 0;">{fqn}</p>
+                        <p style="color: #888; font-size: 0.8rem; margin: 0;">{domain_display}</p>
                     </div>
                 """, unsafe_allow_html=True)
                 
@@ -2875,22 +3046,60 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
     
     st.markdown("---")
     
-    # Filter and search
-    col1, col2, col3 = st.columns(3)
+    # Filter and search with cascading filters
+    col1, col2 = st.columns(2)
     
     with col1:
         status_filter = st.selectbox("Filter by Status", 
                                     ["All", "draft", "review", "active", "deprecated"])
     with col2:
-        db_filter = st.selectbox("Filter by Database", ["All"] + ALLOWED_DATABASES, key="contract_db_filter")
-    with col3:
         owner_search = st.text_input("Search by Owner", "", key="contract_owner_search")
+    
+    # Cascading filters row
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    
+    with filter_col1:
+        domain_filter = st.selectbox("Filter by Domain", ["All"] + ALLOWED_DOMAINS, key="contract_domain_filter")
+    
+    with filter_col2:
+        # Data Asset filter - cascades from Domain
+        if domain_filter != "All" and domain_filter in DATA_ASSETS:
+            available_assets = DATA_ASSETS.get(domain_filter, [])
+            if available_assets:
+                data_asset_filter = st.selectbox("Filter by Data Asset", ["All"] + available_assets, key="contract_data_asset_filter")
+            else:
+                st.selectbox("Filter by Data Asset", ["N/A - No assets defined"], disabled=True, key="contract_data_asset_disabled")
+                data_asset_filter = "All"
+        else:
+            all_assets = []
+            for assets in DATA_ASSETS.values():
+                all_assets.extend(assets)
+            if all_assets:
+                data_asset_filter = st.selectbox("Filter by Data Asset", ["All"] + sorted(set(all_assets)), key="contract_data_asset_all")
+            else:
+                st.selectbox("Filter by Data Asset", ["N/A"], disabled=True, key="contract_data_asset_none")
+                data_asset_filter = "All"
+    
+    with filter_col3:
+        # Database filter - cascades from Data Asset
+        if data_asset_filter != "All" and data_asset_filter in DATA_ASSET_DATABASE_MAPPING:
+            mapped_db = DATA_ASSET_DATABASE_MAPPING.get(data_asset_filter)
+            st.selectbox("Filter by Database", [mapped_db], disabled=True, key="contract_db_mapped")
+            db_filter = mapped_db
+        else:
+            db_filter = st.selectbox("Filter by Database", ["All"] + ALLOWED_DATABASES, key="contract_db_filter")
     
     # Apply filters
     filtered_contracts = list(contracts.values())
     
     if status_filter != "All":
         filtered_contracts = [c for c in filtered_contracts if c.status == status_filter]
+    
+    if domain_filter != "All":
+        filtered_contracts = [c for c in filtered_contracts if c.domain == domain_filter]
+    
+    if data_asset_filter != "All":
+        filtered_contracts = [c for c in filtered_contracts if c.data_asset == data_asset_filter]
     
     if db_filter != "All":
         filtered_contracts = [c for c in filtered_contracts if c.database == db_filter]
@@ -2906,6 +3115,11 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
     for contract in filtered_contracts:
         status_info = CONTRACT_STATUS[contract.status]
         contract_class = f"contract-{contract.status}"
+        
+        # Build domain/asset display
+        domain_display = contract.domain
+        if contract.data_asset:
+            domain_display += f" / {contract.data_asset}"
         
         st.markdown(f"""
             <div class="contract-card {contract_class}">
@@ -2931,14 +3145,15 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
         
         with col2:
             st.markdown(f"**Status:** {contract.status.title()}")
-            st.markdown(f"**Database:** {contract.database}")
+            st.markdown(f"**Domain:** {contract.domain}")
         
         with col3:
-            st.markdown(f"**Columns:** {len(contract.schema_definition)}")
-            st.markdown(f"**Quality Rules:** {len(contract.quality_rules)}")
+            data_asset_display = contract.data_asset if contract.data_asset else "N/A"
+            st.markdown(f"**Data Asset:** {data_asset_display}")
+            st.markdown(f"**Database:** {contract.database}")
         
         with col4:
-            st.markdown(f"**Consumers:** {len(contract.registered_consumers)}")
+            st.markdown(f"**Data History:** {contract.data_history_years} year(s)")
             st.markdown(f"**Contains PII:** {'Yes' if contract.contains_pii else 'No'}")
         
         with st.expander("📋 View Contract Details"):
@@ -2952,6 +3167,7 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
                         "Data Type": col_info["dataType"],
                         "Nullable": "Yes" if col_info["nullable"] else "No",
                         "PII": "Yes" if col_info.get("isPII") else "No",
+                        "Calculation": col_info.get("calculation", "") or "-",
                         "Description": col_info.get("description", "")
                     })
                 st.dataframe(pd.DataFrame(schema_data), use_container_width=True, hide_index=True)
@@ -2977,13 +3193,9 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
                     """, unsafe_allow_html=True)
         
         # Action buttons
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.button("🚀 Generate Code", key=f"generate_{contract.id}"):
-                st.session_state[f"show_code_modal_{contract.id}"] = True
-        
-        with col2:
             if contract.status == "draft" and st.button("📤 Submit for Review", key=f"submit_{contract.id}"):
                 contract_engine.update_contract_status(
                     contract.table_fqn, "review", contract.owner, 
@@ -2992,7 +3204,7 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
                 st.success("Contract submitted for review!")
                 st.rerun()
         
-        with col3:
+        with col2:
             if contract.status == "review" and st.button("✅ Approve", key=f"approve_{contract.id}"):
                 contract_engine.update_contract_status(
                     contract.table_fqn, "active", "governance.team",
@@ -3001,7 +3213,7 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
                 st.success("Contract approved and activated!")
                 st.rerun()
         
-        with col4:
+        with col3:
             if contract.status == "active" and st.button("⚠️ Deprecate", key=f"deprecate_{contract.id}"):
                 contract_engine.update_contract_status(
                     contract.table_fqn, "deprecated", contract.owner,
@@ -3009,81 +3221,6 @@ def render_contract_overview(contracts: Dict[str, DataContract], contract_engine
                 )
                 st.warning("Contract deprecated")
                 st.rerun()
-        
-        # Code Generation Modal
-        if st.session_state.get(f"show_code_modal_{contract.id}", False):
-            with st.expander("🚀 Generated Code Artifacts", expanded=True):
-                st.markdown("### Quick Code Generation")
-                
-                code_gen = CodeGenerationEngine()
-                
-                # Artifact selection
-                artifact_type = st.radio(
-                    "Select artifact to generate:",
-                    ["Databricks DDL", "PySpark Schema", "Quality Tests", "Documentation", "All"],
-                    key=f"artifact_select_{contract.id}",
-                    horizontal=True
-                )
-                
-                generated_code = ""
-                file_name = ""
-                file_ext = "txt"
-                
-                if artifact_type == "Databricks DDL":
-                    generated_code = code_gen.generate_databricks_ddl(contract)
-                    file_name = f"{contract.table_name}_ddl.sql"
-                    file_ext = "sql"
-                elif artifact_type == "PySpark Schema":
-                    generated_code = code_gen.generate_pyspark_schema(contract)
-                    file_name = f"{contract.table_name}_schema.py"
-                    file_ext = "python"
-                elif artifact_type == "Quality Tests":
-                    generated_code = code_gen.generate_quality_tests(contract)
-                    file_name = f"{contract.table_name}_tests.py"
-                    file_ext = "python"
-                elif artifact_type == "Documentation":
-                    generated_code = code_gen.generate_documentation(contract)
-                    file_name = f"{contract.table_name}_contract.md"
-                    file_ext = "markdown"
-                elif artifact_type == "All":
-                    generated_code = f"""# Complete Artifact Package for {contract.table_name}
-
-## 1. Databricks DDL
-{code_gen.generate_databricks_ddl(contract)}
-
-## 2. PySpark Schema
-{code_gen.generate_pyspark_schema(contract)}
-
-## 3. Quality Tests
-{code_gen.generate_quality_tests(contract)}
-
-## 4. Documentation
-{code_gen.generate_documentation(contract)}
-"""
-                    file_name = f"{contract.table_name}_all_artifacts.txt"
-                    file_ext = "markdown"
-                
-                st.code(generated_code, language=file_ext)
-                
-                col_a, col_b, col_c = st.columns(3)
-                
-                with col_a:
-                    st.download_button(
-                        label="💾 Download",
-                        data=generated_code,
-                        file_name=file_name,
-                        mime="text/plain",
-                        key=f"download_modal_{contract.id}"
-                    )
-                
-                with col_b:
-                    if st.button("📋 Copy to Clipboard", key=f"copy_modal_{contract.id}"):
-                        st.success("✅ Copied!")
-                
-                with col_c:
-                    if st.button("✖️ Close", key=f"close_modal_{contract.id}"):
-                        st.session_state[f"show_code_modal_{contract.id}"] = False
-                        st.rerun()
         
         st.markdown("---")
 
@@ -3137,6 +3274,16 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
         
         table_name = selected_table.get("name")
         table_fqn = selected_fqn
+        table_domain = selected_table.get("domain", ALLOWED_DOMAINS[0])
+        table_data_asset = selected_table.get("data_asset", "")
+        table_database = table_fqn.split(".")[0] if table_fqn else ALLOWED_DATABASES[0]
+        
+        # Display hierarchy info
+        hierarchy_info = f"**Domain:** {table_domain}"
+        if table_data_asset:
+            hierarchy_info += f" | **Data Asset:** {table_data_asset}"
+        hierarchy_info += f" | **Database:** {table_database}"
+        st.caption(hierarchy_info)
         
         st.markdown("---")
         
@@ -3158,7 +3305,8 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     "nullable": col.get("constraint", "") != "NOT NULL",
                     "primaryKey": "PRIMARY" in col.get("constraint", "").upper(),
                     "isPII": is_pii,
-                    "description": col.get("description", "")
+                    "description": col.get("description", ""),
+                    "calculation": col.get("calculation", "")
                 })
             # Store original columns for reset functionality
             st.session_state.existing_table_original_columns = [col.copy() for col in st.session_state.existing_table_columns]
@@ -3225,6 +3373,14 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     height=80
                 )
                 col["description"] = description
+                
+                calculation = st.text_input(
+                    "Column Calculation",
+                    value=col.get("calculation", ""),
+                    key=f"exist_col_calc_{idx}",
+                    help="Optional: Define calculation logic (e.g., SUM(amount), col1 + col2)"
+                )
+                col["calculation"] = calculation
         
         # Add new column button and Reset button
         col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
@@ -3237,7 +3393,8 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     "nullable": True,
                     "primaryKey": False,
                     "isPII": False,
-                    "description": ""
+                    "description": "",
+                    "calculation": ""
                 })
                 st.rerun()
         
@@ -3268,13 +3425,16 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     "dataType": col["dataType"],
                     "constraint": "" if col["nullable"] else "NOT NULL",
                     "description": col.get("description", ""),
-                    "tags": [{"tagFQN": "PII"}] if col["isPII"] else []
+                    "tags": [{"tagFQN": "PII"}] if col["isPII"] else [],
+                    "calculation": col.get("calculation", "")
                 }
                 for col in table_columns
             ],
             "owner": selected_table.get("owner", {}),
             "description": selected_table.get("description", ""),
-            "tags": selected_table.get("tags", [])
+            "tags": selected_table.get("tags", []),
+            "domain": table_domain,
+            "data_asset": table_data_asset
         }
         
     # ========== MODE 2: NEW TABLE FROM SCRATCH ==========
@@ -3283,28 +3443,47 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
         
         st.info("💡 Design your table contract first, then use Developer Tools to generate DDL for implementation")
         
-        # Table identification
+        # Table identification with cascading filters
         col1, col2 = st.columns(2)
         
         with col1:
-            database = st.selectbox("Database *", ALLOWED_DATABASES, help="Target database")
-            schema = st.text_input("Schema *", value="default", help="Schema/namespace name")
+            table_domain = st.selectbox("Domain *", ALLOWED_DOMAINS, help="Supply chain area", key="new_table_domain")
         
         with col2:
+            # Data Asset - cascades from Domain
+            available_assets = DATA_ASSETS.get(table_domain, [])
+            if available_assets:
+                table_data_asset = st.selectbox("Data Asset *", available_assets, help="Data asset within domain", key="new_table_data_asset")
+            else:
+                st.selectbox("Data Asset", ["N/A - No assets defined for this domain"], disabled=True, key="new_table_data_asset_disabled")
+                table_data_asset = ""
+        
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            # Database - user selects from available databases
+            table_database = st.selectbox("Database *", ALLOWED_DATABASES, help="Target database", key="new_table_db")
+        
+        with col4:
             table_name = st.text_input("Table Name *", help="Name of the new table")
         
         if not table_name:
             st.warning("⚠️ Please enter a table name to continue")
             return
         
-        table_fqn = f"{database}.{schema}.{table_name}"
+        table_fqn = f"{table_database}.{table_name}"
         
         # Check if FQN already exists
         if table_fqn in contracts:
             st.error(f"❌ Contract already exists for {table_fqn}")
             return
         
-        st.success(f"✅ New table FQN: `{table_fqn}`")
+        # Display hierarchy info
+        hierarchy_display = f"Domain: `{table_domain}`"
+        if table_data_asset:
+            hierarchy_display += f" | Data Asset: `{table_data_asset}`"
+        hierarchy_display += f" | Database: `{table_database}` | FQN: `{table_fqn}`"
+        st.success(f"✅ {hierarchy_display}")
         
         st.markdown("---")
         
@@ -3315,7 +3494,7 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
         # Initialize session state for columns if not exists
         if "new_table_columns" not in st.session_state:
             st.session_state.new_table_columns = [
-                {"name": "id", "dataType": "INTEGER", "nullable": False, "primaryKey": True, "isPII": False, "description": "Primary key"}
+                {"name": "id", "dataType": "INTEGER", "nullable": False, "primaryKey": True, "isPII": False, "description": "Primary key", "calculation": ""}
             ]
         
         # Display existing columns
@@ -3375,6 +3554,14 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     height=80
                 )
                 col["description"] = description
+                
+                calculation = st.text_input(
+                    "Column Calculation",
+                    value=col.get("calculation", ""),
+                    key=f"col_calc_{idx}",
+                    help="Optional: Define calculation logic (e.g., SUM(amount), col1 + col2)"
+                )
+                col["calculation"] = calculation
         
         # Add new column button
         col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
@@ -3387,14 +3574,15 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     "nullable": True,
                     "primaryKey": False,
                     "isPII": False,
-                    "description": ""
+                    "description": "",
+                    "calculation": ""
                 })
                 st.rerun()
         
         with col_btn2:
             if st.button("🔄 Reset Schema", use_container_width=True):
                 st.session_state.new_table_columns = [
-                    {"name": "id", "dataType": "INTEGER", "nullable": False, "primaryKey": True, "isPII": False, "description": "Primary key"}
+                    {"name": "id", "dataType": "INTEGER", "nullable": False, "primaryKey": True, "isPII": False, "description": "Primary key", "calculation": ""}
                 ]
                 st.rerun()
         
@@ -3411,13 +3599,16 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     "dataType": col["dataType"],
                     "constraint": "" if col["nullable"] else "NOT NULL",
                     "description": col.get("description", ""),
-                    "tags": [{"tagFQN": "PII"}] if col["isPII"] else []
+                    "tags": [{"tagFQN": "PII"}] if col["isPII"] else [],
+                    "calculation": col.get("calculation", "")
                 }
                 for col in table_columns
             ],
             "owner": {},
             "description": "",
-            "tags": []
+            "tags": [],
+            "domain": table_domain,
+            "data_asset": table_data_asset
         }
     
     st.markdown("---")
@@ -3445,6 +3636,14 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                                    min_value=1, max_value=168, value=24,
                                    help="Maximum age of data in hours")
         
+        data_history_years = st.selectbox("Data History (Retention) *",
+                                         options=[1, 2, 3, 5, 7, 10],
+                                         index=1,  # Default to 2 years
+                                         help="Number of years to retain data for this contract")
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
         if creation_mode == "📊 From Existing Table":
             default_pii = any("PII" in str(col.get("tags", [])) for col in selected_table.get("columns", []))
         else:
@@ -3830,6 +4029,11 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
             st.error("Please fill in all required fields (*)")
         else:
             try:
+                # Get domain, data_asset, and database - these are set in both modes
+                contract_domain = table_domain
+                contract_data_asset = table_data_asset
+                contract_database = table_database
+                
                 contract = contract_engine.create_contract(
                     table=selected_table,
                     owner=owner,
@@ -3838,7 +4042,11 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                     business_purpose=business_purpose,
                     quality_rules=quality_rules,
                     sla_hours=sla_hours,
-                    contains_pii=contains_pii
+                    contains_pii=contains_pii,
+                    domain=contract_domain,
+                    data_asset=contract_data_asset,
+                    database=contract_database,
+                    data_history_years=data_history_years
                 )
                 
                 # Add to session state contracts
@@ -3863,7 +4071,13 @@ def render_contract_creation_wizard(tables: List[Dict], contracts: Dict[str, Dat
                 if "dq_rules_table_id" in st.session_state:
                     del st.session_state.dq_rules_table_id
                 
-                st.success(f"✅ Contract created successfully for {selected_table.get('name')}!")
+                # Build success message with hierarchy info
+                hierarchy_msg = f"Domain: {contract_domain}"
+                if contract_data_asset:
+                    hierarchy_msg += f", Data Asset: {contract_data_asset}"
+                hierarchy_msg += f", Database: {contract_database}"
+                
+                st.success(f"✅ Contract created successfully for {selected_table.get('name')}! ({hierarchy_msg})")
                 
                 if creation_mode == "✨ Design New Table from Scratch":
                     st.info("Contract is in **DRAFT** status. Submit for review to activate.")
@@ -4798,29 +5012,29 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
     
     st.markdown("---")
     
-    # ==== DATABASE PERFORMANCE ====
-    st.markdown("### 🗄️ Trust Score by Database")
+    # ==== DOMAIN PERFORMANCE ====
+    st.markdown("### 🏢 Trust Score by Domain")
     
-    db_averages = summary.get("database_averages", {})
-    if db_averages:
-        sorted_dbs = sorted(db_averages.items(), key=lambda x: x[1], reverse=True)
+    domain_averages = summary.get("domain_averages", {})
+    if domain_averages:
+        sorted_domains = sorted(domain_averages.items(), key=lambda x: x[1], reverse=True)
         
         fig = go.Figure()
         
         colors = ['#27ae60' if v >= 75 else '#f39c12' if v >= 60 else '#e74c3c' 
-                 for _, v in sorted_dbs]
+                 for _, v in sorted_domains]
         
         fig.add_trace(go.Bar(
-            x=[k for k, _ in sorted_dbs],
-            y=[v for _, v in sorted_dbs],
+            x=[k for k, _ in sorted_domains],
+            y=[v for _, v in sorted_domains],
             marker_color=colors,
-            text=[f"{v:.1f}" for _, v in sorted_dbs],
+            text=[f"{v:.1f}" for _, v in sorted_domains],
             textposition='auto',
         ))
         
         fig.update_layout(
-            title="Average Trust Score by Database",
-            xaxis_title="Database",
+            title="Average Trust Score by Domain",
+            xaxis_title="Domain",
             yaxis_title="Average Score",
             height=400,
             showlegend=False,
@@ -4834,28 +5048,65 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
     # ==== DETAILED ASSET SCORECARD ====
     st.markdown("### 📋 Detailed Asset Scorecard")
     
-    # Filters
-    col1, col2, col3 = st.columns(3)
+    # Filters with cascading logic
+    col1, col2 = st.columns(2)
     
     with col1:
-        filter_database = st.multiselect(
-            "Filter by Database",
-            options=sorted(set(ts.database for ts in trust_scores)),
-            default=[]
+        filter_domain = st.multiselect(
+            "Filter by Domain",
+            options=sorted(set(ts.domain for ts in trust_scores)),
+            default=[],
+            key="trust_filter_domain"
         )
     
     with col2:
+        # Data Asset filter - shows assets based on selected domains
+        if filter_domain:
+            available_assets = set()
+            for domain in filter_domain:
+                available_assets.update(DATA_ASSETS.get(domain, []))
+            available_assets = sorted(available_assets)
+        else:
+            available_assets = sorted(set(ts.data_asset for ts in trust_scores if ts.data_asset))
+        
+        if available_assets:
+            filter_data_asset = st.multiselect(
+                "Filter by Data Asset",
+                options=available_assets,
+                default=[],
+                key="trust_filter_data_asset"
+            )
+        else:
+            st.multiselect("Filter by Data Asset", options=["N/A"], disabled=True, key="trust_filter_data_asset_disabled")
+            filter_data_asset = []
+    
+    col3, col4, col5 = st.columns(3)
+    
+    with col3:
+        filter_database = st.multiselect(
+            "Filter by Database",
+            options=sorted(set(ts.database for ts in trust_scores)),
+            default=[],
+            key="trust_filter_database"
+        )
+    
+    with col4:
         filter_level = st.multiselect(
             "Filter by Trust Level",
             options=["Platinum", "Gold", "Silver", "Bronze", "Needs Attention"],
-            default=[]
+            default=[],
+            key="trust_filter_level"
         )
     
-    with col3:
-        min_score = st.slider("Minimum Trust Score", 0, 100, 0)
+    with col5:
+        min_score = st.slider("Minimum Trust Score", 0, 100, 0, key="trust_min_score")
     
     # Apply filters
     filtered_scores = trust_scores
+    if filter_domain:
+        filtered_scores = [ts for ts in filtered_scores if ts.domain in filter_domain]
+    if filter_data_asset:
+        filtered_scores = [ts for ts in filtered_scores if ts.data_asset in filter_data_asset]
     if filter_database:
         filtered_scores = [ts for ts in filtered_scores if ts.database in filter_database]
     if filter_level:
@@ -4865,7 +5116,8 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
     # Sort options
     sort_by = st.selectbox(
         "Sort by",
-        ["Trust Score (High to Low)", "Trust Score (Low to High)", "Table Name", "Database"]
+        ["Trust Score (High to Low)", "Trust Score (Low to High)", "Table Name", "Domain", "Data Asset"],
+        key="trust_sort_by"
     )
     
     if sort_by == "Trust Score (High to Low)":
@@ -4874,8 +5126,10 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
         filtered_scores = sorted(filtered_scores, key=lambda x: x.composite_trust_score)
     elif sort_by == "Table Name":
         filtered_scores = sorted(filtered_scores, key=lambda x: x.table_name)
-    elif sort_by == "Database":
-        filtered_scores = sorted(filtered_scores, key=lambda x: (x.database, x.table_name))
+    elif sort_by == "Domain":
+        filtered_scores = sorted(filtered_scores, key=lambda x: (x.domain, x.table_name))
+    elif sort_by == "Data Asset":
+        filtered_scores = sorted(filtered_scores, key=lambda x: (x.data_asset or "ZZZ", x.table_name))
     
     st.caption(f"Showing {len(filtered_scores)} of {len(trust_scores)} assets")
     
@@ -4898,6 +5152,9 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
             
             with col1:
                 st.markdown(f"**FQN:** `{ts.fqn}`")
+                st.markdown(f"**Domain:** {ts.domain}")
+                if ts.data_asset:
+                    st.markdown(f"**Data Asset:** {ts.data_asset}")
                 st.markdown(f"**Database:** {ts.database}")
                 if ts.owner:
                     st.markdown(f"**Owner:** {ts.owner}")
@@ -4969,6 +5226,8 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
             export_data.append({
                 "FQN": ts.fqn,
                 "Table Name": ts.table_name,
+                "Domain": ts.domain,
+                "Data Asset": ts.data_asset or "N/A",
                 "Database": ts.database,
                 "Owner": ts.owner or "Unassigned",
                 "Classification": ts.classification or "Unclassified",
@@ -5046,6 +5305,7 @@ def main():
             st.metric("Active Contracts", 
                      len([c for c in st.session_state.contract_engine.contracts.values() 
                           if c.status == "active"]))
+            st.metric("Domains", len(ALLOWED_DOMAINS))
             st.metric("Databases", len(ALLOWED_DATABASES))
             
             # Governance score
@@ -5054,7 +5314,12 @@ def main():
                 st.metric("Governance Score", f"{score:.1f}%")
         
         st.markdown("---")
-        st.markdown("### 🗂️ Databases")
+        st.markdown("### 🏢 Domains")
+        for domain in ALLOWED_DOMAINS:
+            st.caption(f"• {domain}")
+        
+        st.markdown("---")
+        st.markdown("### 🗄️ Databases")
         for db in ALLOWED_DATABASES:
             st.caption(f"• {db}")
         
