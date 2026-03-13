@@ -354,6 +354,76 @@ class DataTrustScore:
     improvement_areas: List[str] = field(default_factory=list)
     strengths: List[str] = field(default_factory=list)
 
+@dataclass
+class MetricDefinition:
+    """Metric definition for Data Products (supports Metric Dependency Tree)"""
+    name: str
+    description: str
+    formula: str  # e.g., "SUM(revenue)", "COUNT(DISTINCT customers)"
+    unit: str  # e.g., "$", "%", "count"
+    source_columns: List[str] = field(default_factory=list)  # Columns used in calculation
+    
+@dataclass  
+class OutputPort:
+    """Output port for Data Product consumption"""
+    name: str
+    port_type: str  # "dataset", "api", "stream", "dashboard"
+    format: str  # "parquet", "json", "csv", "rest", "graphql"
+    description: str
+    access_pattern: str = "batch"  # "batch", "real-time", "on-demand"
+    endpoint: str = ""  # URL or path when applicable
+
+@dataclass
+class DataProduct:
+    """
+    Business-aligned Data Product - the core marketplace unit.
+    Implements Right-to-Left philosophy: starts with business purpose,
+    wraps multiple data assets/tables into a consumable product.
+    """
+    id: str
+    name: str  # e.g., "Delivery Performance Tracker"
+    domain: str  # Supply chain area: Deliver, Plan, Make, etc.
+    
+    # Business Alignment (Right-to-Left: demand-driven)
+    business_purpose: str  # The "why" - what business question does this answer?
+    target_personas: List[str]  # Who consumes this: ["Sales Manager", "Supply Chain Analyst"]
+    
+    # Metrics (Playbook: Metric Dependency Tree)
+    north_star_metric: MetricDefinition  # Primary KPI that matters most
+    functional_metrics: List[MetricDefinition]  # Supporting metrics
+    granular_metrics: List[MetricDefinition]  # Detailed operational metrics
+    
+    # Composition - links to existing entities
+    data_assets: List[str]  # Data assets included (e.g., ["Delivery", "Transportation"])
+    table_fqns: List[str]  # FQNs of constituent tables
+    contract_ids: List[str]  # IDs of linked contracts
+    
+    # Output Ports - how consumers access this product
+    output_ports: List[OutputPort]
+    
+    # Lifecycle
+    status: str  # "draft", "active", "deprecated"
+    version: str
+    owner: str
+    created_date: datetime
+    last_modified: datetime
+    
+    # Marketplace metadata
+    tags: List[str] = field(default_factory=list)
+    documentation_url: str = ""
+    
+    # Usage & ratings
+    usage_count: int = 0
+    consumer_count: int = 0
+    rating: float = 0.0
+    
+    # Aggregated trust (computed from constituent tables)
+    aggregated_trust_score: float = 0.0
+    trust_level: str = "Needs Attention"
+    
+    # Change tracking
+    change_log: List[Dict[str, Any]] = field(default_factory=list)
+
 # =============================================================================
 # OPENMETADATA CLIENT
 # =============================================================================
@@ -1156,6 +1226,281 @@ class TrustScoreEngine:
             "high_trust_assets": len([s for s in scores if s >= 75]),
             "needs_attention_assets": len([s for s in scores if s < 40])
         }
+
+# =============================================================================
+# DATA PRODUCT ENGINE
+# =============================================================================
+
+class DataProductEngine:
+    """
+    Engine for managing Data Products - the core marketplace entity.
+    Implements Right-to-Left philosophy: products are defined by business purpose
+    and wrap multiple data assets/tables into consumable units.
+    """
+    
+    def __init__(self):
+        self.products: Dict[str, DataProduct] = {}
+    
+    def create_product(
+        self,
+        name: str,
+        domain: str,
+        business_purpose: str,
+        target_personas: List[str],
+        north_star_metric: Dict[str, Any],
+        functional_metrics: List[Dict[str, Any]],
+        granular_metrics: List[Dict[str, Any]],
+        data_assets: List[str],
+        table_fqns: List[str],
+        contract_ids: List[str],
+        output_ports: List[Dict[str, Any]],
+        owner: str,
+        tags: List[str] = None
+    ) -> DataProduct:
+        """Create a new Data Product"""
+        
+        product_id = hashlib.md5(f"{name}_{domain}_{datetime.now().isoformat()}".encode()).hexdigest()[:12]
+        
+        # Convert dict definitions to dataclass instances
+        ns_metric = MetricDefinition(
+            name=north_star_metric.get("name", ""),
+            description=north_star_metric.get("description", ""),
+            formula=north_star_metric.get("formula", ""),
+            unit=north_star_metric.get("unit", ""),
+            source_columns=north_star_metric.get("source_columns", [])
+        )
+        
+        func_metrics = [
+            MetricDefinition(
+                name=m.get("name", ""),
+                description=m.get("description", ""),
+                formula=m.get("formula", ""),
+                unit=m.get("unit", ""),
+                source_columns=m.get("source_columns", [])
+            )
+            for m in functional_metrics
+        ]
+        
+        gran_metrics = [
+            MetricDefinition(
+                name=m.get("name", ""),
+                description=m.get("description", ""),
+                formula=m.get("formula", ""),
+                unit=m.get("unit", ""),
+                source_columns=m.get("source_columns", [])
+            )
+            for m in granular_metrics
+        ]
+        
+        ports = [
+            OutputPort(
+                name=p.get("name", ""),
+                port_type=p.get("port_type", "dataset"),
+                format=p.get("format", "parquet"),
+                description=p.get("description", ""),
+                access_pattern=p.get("access_pattern", "batch"),
+                endpoint=p.get("endpoint", "")
+            )
+            for p in output_ports
+        ]
+        
+        product = DataProduct(
+            id=product_id,
+            name=name,
+            domain=domain,
+            business_purpose=business_purpose,
+            target_personas=target_personas,
+            north_star_metric=ns_metric,
+            functional_metrics=func_metrics,
+            granular_metrics=gran_metrics,
+            data_assets=data_assets,
+            table_fqns=table_fqns,
+            contract_ids=contract_ids,
+            output_ports=ports,
+            status="draft",
+            version="1.0.0",
+            owner=owner,
+            created_date=datetime.now(),
+            last_modified=datetime.now(),
+            tags=tags or [],
+            change_log=[{
+                "timestamp": datetime.now(),
+                "action": "created",
+                "user": owner,
+                "details": f"Data Product '{name}' created"
+            }]
+        )
+        
+        self.products[product_id] = product
+        return product
+    
+    def update_product_status(self, product_id: str, new_status: str, user: str, reason: str = "") -> bool:
+        """Update product status with audit trail"""
+        if product_id not in self.products:
+            return False
+        
+        product = self.products[product_id]
+        old_status = product.status
+        product.status = new_status
+        product.last_modified = datetime.now()
+        
+        product.change_log.append({
+            "timestamp": datetime.now(),
+            "action": f"status_change_{old_status}_to_{new_status}",
+            "user": user,
+            "details": reason or f"Status changed from {old_status} to {new_status}"
+        })
+        
+        return True
+    
+    def calculate_aggregated_trust(
+        self, 
+        product: DataProduct, 
+        trust_scores: List[DataTrustScore]
+    ) -> Tuple[float, str]:
+        """
+        Calculate aggregated trust score for a product based on its constituent tables.
+        Returns (score, trust_level)
+        """
+        # Filter trust scores for tables in this product
+        product_scores = [
+            ts for ts in trust_scores 
+            if ts.fqn in product.table_fqns
+        ]
+        
+        if not product_scores:
+            return 0.0, "Needs Attention"
+        
+        # Calculate weighted average (all tables equal weight for now)
+        avg_score = sum(ts.composite_trust_score for ts in product_scores) / len(product_scores)
+        
+        # Determine trust level
+        if avg_score >= 90:
+            trust_level = "Platinum"
+        elif avg_score >= 75:
+            trust_level = "Gold"
+        elif avg_score >= 60:
+            trust_level = "Silver"
+        elif avg_score >= 40:
+            trust_level = "Bronze"
+        else:
+            trust_level = "Needs Attention"
+        
+        return avg_score, trust_level
+    
+    def get_product_consumers(self, product: DataProduct, contracts: Dict[str, DataContract]) -> List[str]:
+        """Aggregate consumers from all contracts in the product"""
+        consumers = set()
+        for contract_id in product.contract_ids:
+            # Find contract by ID
+            for fqn, contract in contracts.items():
+                if contract.id == contract_id:
+                    consumers.update(contract.registered_consumers)
+                    break
+        return list(consumers)
+    
+    def get_products_by_domain(self, domain: str) -> List[DataProduct]:
+        """Get all products for a specific domain"""
+        return [p for p in self.products.values() if p.domain == domain]
+    
+    def get_products_by_status(self, status: str) -> List[DataProduct]:
+        """Get products filtered by status"""
+        return [p for p in self.products.values() if p.status == status]
+    
+    def get_active_products(self) -> List[DataProduct]:
+        """Get all active products"""
+        return self.get_products_by_status("active")
+    
+    def search_products(self, query: str) -> List[DataProduct]:
+        """Search products by name, description, or tags"""
+        query_lower = query.lower()
+        results = []
+        for product in self.products.values():
+            if (query_lower in product.name.lower() or
+                query_lower in product.business_purpose.lower() or
+                any(query_lower in tag.lower() for tag in product.tags) or
+                any(query_lower in persona.lower() for persona in product.target_personas)):
+                results.append(product)
+        return results
+    
+    def generate_product_manifest(self, product: DataProduct) -> str:
+        """Generate YAML manifest for the data product (DataOS-style spec)"""
+        manifest = f"""# Data Product Manifest
+# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+name: {product.name.lower().replace(' ', '-')}
+version: {product.version}
+type: data-product
+status: {product.status}
+
+meta:
+  id: {product.id}
+  domain: {product.domain}
+  owner: {product.owner}
+  tags: {product.tags}
+
+business:
+  purpose: |
+    {product.business_purpose}
+  target_personas:
+"""
+        for persona in product.target_personas:
+            manifest += f"    - {persona}\n"
+        
+        manifest += f"""
+metrics:
+  north_star:
+    name: {product.north_star_metric.name}
+    description: {product.north_star_metric.description}
+    formula: "{product.north_star_metric.formula}"
+    unit: "{product.north_star_metric.unit}"
+  
+  functional:
+"""
+        for metric in product.functional_metrics:
+            manifest += f"""    - name: {metric.name}
+      formula: "{metric.formula}"
+      unit: "{metric.unit}"
+"""
+        
+        manifest += """  
+  granular:
+"""
+        for metric in product.granular_metrics:
+            manifest += f"""    - name: {metric.name}
+      formula: "{metric.formula}"
+      unit: "{metric.unit}"
+"""
+        
+        manifest += f"""
+composition:
+  data_assets:
+"""
+        for asset in product.data_assets:
+            manifest += f"    - {asset}\n"
+        
+        manifest += """  tables:
+"""
+        for fqn in product.table_fqns:
+            manifest += f"    - {fqn}\n"
+        
+        manifest += """
+output_ports:
+"""
+        for port in product.output_ports:
+            manifest += f"""  - name: {port.name}
+    type: {port.port_type}
+    format: {port.format}
+    access_pattern: {port.access_pattern}
+"""
+        
+        manifest += f"""
+quality:
+  aggregated_trust_score: {product.aggregated_trust_score:.1f}
+  trust_level: {product.trust_level}
+"""
+        
+        return manifest
 
 # =============================================================================
 # CODE GENERATION ENGINE
@@ -2499,6 +2844,187 @@ class MockDataGenerator:
             ],
             "upstreamEdges": []
         }
+    
+    @staticmethod
+    def generate_mock_data_products(
+        tables: List[Dict], 
+        contracts: Dict[str, DataContract],
+        trust_scores: List[DataTrustScore] = None
+    ) -> Dict[str, DataProduct]:
+        """
+        Generate mock Data Products that wrap multiple data assets and tables.
+        Each product represents a business-aligned, consumable data unit.
+        """
+        import random
+        
+        products = {}
+        product_engine = DataProductEngine()
+        
+        # Define sample data products for Deliver domain
+        # These wrap multiple data assets following Right-to-Left philosophy
+        product_definitions = [
+            {
+                "name": "Delivery Performance Tracker",
+                "domain": "Deliver",
+                "business_purpose": "Enable supply chain managers to monitor end-to-end delivery performance, identify bottlenecks, and optimize logistics operations. Answers: What is our on-time delivery rate? Where are the delays occurring?",
+                "target_personas": ["Supply Chain Manager", "Logistics Analyst", "Operations Director"],
+                "data_assets": ["Delivery", "Transportation", "Shipment"],
+                "north_star": {
+                    "name": "On-Time Delivery Rate",
+                    "description": "Percentage of deliveries completed within SLA",
+                    "formula": "COUNT(on_time_deliveries) / COUNT(total_deliveries) * 100",
+                    "unit": "%"
+                },
+                "functional": [
+                    {"name": "Average Delivery Time", "formula": "AVG(delivery_time_hours)", "unit": "hours", "description": "Mean time from dispatch to delivery"},
+                    {"name": "Delivery Volume", "formula": "COUNT(deliveries)", "unit": "count", "description": "Total number of deliveries"}
+                ],
+                "granular": [
+                    {"name": "Late Delivery Count", "formula": "COUNT(late_deliveries)", "unit": "count", "description": "Number of deliveries past SLA"},
+                    {"name": "Avg Delay Duration", "formula": "AVG(delay_hours)", "unit": "hours", "description": "Average delay for late deliveries"}
+                ],
+                "output_ports": [
+                    {"name": "Performance Dashboard", "port_type": "dashboard", "format": "powerbi", "description": "Real-time delivery KPIs"},
+                    {"name": "Analytics Dataset", "port_type": "dataset", "format": "parquet", "description": "Historical delivery data for analysis"},
+                    {"name": "Alerts API", "port_type": "api", "format": "rest", "description": "Real-time delay notifications"}
+                ],
+                "tags": ["delivery", "logistics", "performance", "kpi"]
+            },
+            {
+                "name": "Sales Order Intelligence",
+                "domain": "Deliver",
+                "business_purpose": "Provide sales and fulfillment teams with comprehensive order insights to improve order processing efficiency and customer satisfaction. Answers: What is our order fulfillment rate? Which orders are at risk?",
+                "target_personas": ["Sales Manager", "Customer Success Manager", "Fulfillment Lead"],
+                "data_assets": ["Sales Order", "Delivery"],
+                "north_star": {
+                    "name": "Order Fulfillment Rate",
+                    "description": "Percentage of orders fulfilled completely and on time",
+                    "formula": "COUNT(fulfilled_orders) / COUNT(total_orders) * 100",
+                    "unit": "%"
+                },
+                "functional": [
+                    {"name": "Average Order Value", "formula": "AVG(order_value)", "unit": "$", "description": "Mean value per order"},
+                    {"name": "Order Cycle Time", "formula": "AVG(order_to_delivery_days)", "unit": "days", "description": "Average days from order to delivery"}
+                ],
+                "granular": [
+                    {"name": "Pending Orders", "formula": "COUNT(pending_orders)", "unit": "count", "description": "Orders awaiting fulfillment"},
+                    {"name": "Backorder Rate", "formula": "COUNT(backorders) / COUNT(orders) * 100", "unit": "%", "description": "Percentage of backordered items"}
+                ],
+                "output_ports": [
+                    {"name": "Order Analytics", "port_type": "dataset", "format": "parquet", "description": "Order history and analytics"},
+                    {"name": "Fulfillment API", "port_type": "api", "format": "rest", "description": "Order status and tracking"}
+                ],
+                "tags": ["sales", "orders", "fulfillment", "customer"]
+            },
+            {
+                "name": "Transportation Cost Optimizer",
+                "domain": "Deliver",
+                "business_purpose": "Help logistics teams analyze and optimize transportation costs across carriers and routes. Answers: What are our transportation costs per unit? Which routes are most cost-effective?",
+                "target_personas": ["Logistics Manager", "Finance Analyst", "Procurement Lead"],
+                "data_assets": ["Transportation", "Shipment"],
+                "north_star": {
+                    "name": "Cost Per Unit Shipped",
+                    "description": "Average transportation cost per unit delivered",
+                    "formula": "SUM(transport_cost) / SUM(units_shipped)",
+                    "unit": "$"
+                },
+                "functional": [
+                    {"name": "Total Transport Cost", "formula": "SUM(transport_cost)", "unit": "$", "description": "Total transportation spend"},
+                    {"name": "Carrier Utilization", "formula": "AVG(capacity_used) / AVG(total_capacity) * 100", "unit": "%", "description": "Average carrier capacity utilization"}
+                ],
+                "granular": [
+                    {"name": "Cost by Carrier", "formula": "SUM(cost) GROUP BY carrier", "unit": "$", "description": "Breakdown by carrier"},
+                    {"name": "Route Efficiency", "formula": "distance / fuel_used", "unit": "miles/gallon", "description": "Fuel efficiency by route"}
+                ],
+                "output_ports": [
+                    {"name": "Cost Dashboard", "port_type": "dashboard", "format": "powerbi", "description": "Transportation cost analytics"},
+                    {"name": "Cost Dataset", "port_type": "dataset", "format": "csv", "description": "Cost data for finance systems"}
+                ],
+                "tags": ["transportation", "cost", "optimization", "logistics"]
+            },
+            {
+                "name": "Shipment Tracking Hub",
+                "domain": "Deliver",
+                "business_purpose": "Provide real-time visibility into shipment status for customer service and operations teams. Answers: Where is my shipment? What shipments need attention?",
+                "target_personas": ["Customer Service Rep", "Operations Coordinator", "Warehouse Manager"],
+                "data_assets": ["Shipment", "Transportation", "Delivery"],
+                "north_star": {
+                    "name": "Shipment Visibility Rate",
+                    "description": "Percentage of shipments with real-time tracking",
+                    "formula": "COUNT(tracked_shipments) / COUNT(total_shipments) * 100",
+                    "unit": "%"
+                },
+                "functional": [
+                    {"name": "Active Shipments", "formula": "COUNT(in_transit_shipments)", "unit": "count", "description": "Currently in-transit shipments"},
+                    {"name": "Exception Rate", "formula": "COUNT(exceptions) / COUNT(shipments) * 100", "unit": "%", "description": "Shipments with issues"}
+                ],
+                "granular": [
+                    {"name": "Shipments by Status", "formula": "COUNT(*) GROUP BY status", "unit": "count", "description": "Distribution by status"},
+                    {"name": "Avg Transit Time", "formula": "AVG(transit_days)", "unit": "days", "description": "Average time in transit"}
+                ],
+                "output_ports": [
+                    {"name": "Tracking API", "port_type": "api", "format": "rest", "description": "Real-time shipment tracking"},
+                    {"name": "Status Stream", "port_type": "stream", "format": "json", "description": "Live shipment updates"},
+                    {"name": "Tracking Dataset", "port_type": "dataset", "format": "parquet", "description": "Historical shipment data"}
+                ],
+                "tags": ["shipment", "tracking", "real-time", "visibility"]
+            }
+        ]
+        
+        owners = ["alice.data", "bob.engineering", "carol.analytics", "dave.ops"]
+        
+        for i, prod_def in enumerate(product_definitions):
+            # Find tables that belong to the data assets in this product
+            product_tables = [
+                t for t in tables
+                if t.get("data_asset", "") in prod_def["data_assets"]
+            ]
+            
+            # Get FQNs and find matching contracts
+            table_fqns = [t.get("fullyQualifiedName", "") for t in product_tables[:8]]  # Limit to 8 tables per product
+            contract_ids = []
+            for fqn in table_fqns:
+                if fqn in contracts:
+                    contract_ids.append(contracts[fqn].id)
+            
+            # Create the product
+            product = product_engine.create_product(
+                name=prod_def["name"],
+                domain=prod_def["domain"],
+                business_purpose=prod_def["business_purpose"],
+                target_personas=prod_def["target_personas"],
+                north_star_metric=prod_def["north_star"],
+                functional_metrics=prod_def["functional"],
+                granular_metrics=prod_def["granular"],
+                data_assets=prod_def["data_assets"],
+                table_fqns=table_fqns,
+                contract_ids=contract_ids,
+                output_ports=prod_def["output_ports"],
+                owner=owners[i % len(owners)],
+                tags=prod_def["tags"]
+            )
+            
+            # Set some to active
+            if random.random() > 0.3:
+                product_engine.update_product_status(product.id, "active", product.owner, "Approved for production use")
+            
+            # Add mock usage stats
+            product.usage_count = random.randint(50, 500)
+            product.consumer_count = random.randint(5, 30)
+            product.rating = round(random.uniform(3.5, 5.0), 1)
+            
+            # Calculate aggregated trust if scores available
+            if trust_scores:
+                score, level = product_engine.calculate_aggregated_trust(product, trust_scores)
+                product.aggregated_trust_score = score
+                product.trust_level = level
+            else:
+                product.aggregated_trust_score = random.uniform(55, 90)
+                product.trust_level = "Gold" if product.aggregated_trust_score >= 75 else "Silver"
+            
+            products[product.id] = product
+        
+        return products
 
 # =============================================================================
 # UI COMPONENTS
@@ -5256,6 +5782,881 @@ def render_trust_scorecard(tables: List[Dict], contracts: Dict[str, DataContract
         st.dataframe(df, use_container_width=True, height=400)
 
 # =============================================================================
+# DATA PRODUCTS MARKETPLACE UI
+# =============================================================================
+
+def render_data_products(
+    products: Dict[str, DataProduct],
+    tables: List[Dict],
+    contracts: Dict[str, DataContract],
+    trust_scores: List[DataTrustScore],
+    product_engine: DataProductEngine
+):
+    """Render Data Products Marketplace - the business-aligned view of data"""
+    
+    st.markdown('<div class="main-header">📦 Data Products Marketplace</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Business-aligned data products for self-service analytics</div>', 
+                unsafe_allow_html=True)
+    st.markdown("---")
+    
+    # Initialize session state for product view
+    if "selected_product_id" not in st.session_state:
+        st.session_state.selected_product_id = None
+    if "show_product_wizard" not in st.session_state:
+        st.session_state.show_product_wizard = False
+    
+    # Top metrics
+    active_products = [p for p in products.values() if p.status == "active"]
+    total_consumers = sum(p.consumer_count for p in products.values())
+    avg_trust = sum(p.aggregated_trust_score for p in products.values()) / len(products) if products else 0
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        render_metric_card_gradient(
+            "Total Products",
+            str(len(products)),
+            f"{len(active_products)} active",
+            "metric-card-blue"
+        )
+    
+    with col2:
+        render_metric_card_gradient(
+            "Total Consumers",
+            str(total_consumers),
+            "across all products",
+            "metric-card-green"
+        )
+    
+    with col3:
+        render_metric_card_gradient(
+            "Avg Trust Score",
+            f"{avg_trust:.1f}%",
+            "product quality",
+            "metric-card-purple"
+        )
+    
+    with col4:
+        render_metric_card_gradient(
+            "Data Assets",
+            str(len(set(a for p in products.values() for a in p.data_assets))),
+            "covered by products",
+            "metric-card-orange"
+        )
+    
+    st.markdown("---")
+    
+    # Sub-tabs for different views
+    subtab1, subtab2, subtab3 = st.tabs(["🏪 Product Catalog", "➕ Create Product", "📊 Product Analytics"])
+    
+    with subtab1:
+        render_product_catalog(products, tables, contracts, trust_scores, product_engine)
+    
+    with subtab2:
+        render_product_creation_wizard(tables, contracts, product_engine)
+    
+    with subtab3:
+        render_product_analytics(products, trust_scores)
+
+
+def render_product_catalog(
+    products: Dict[str, DataProduct],
+    tables: List[Dict],
+    contracts: Dict[str, DataContract],
+    trust_scores: List[DataTrustScore],
+    product_engine: DataProductEngine
+):
+    """Render the product catalog with filtering and detail view"""
+    
+    # Filters
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        domain_filter = st.selectbox(
+            "Domain",
+            ["All Domains"] + ALLOWED_DOMAINS,
+            key="product_domain_filter"
+        )
+    
+    with col2:
+        status_filter = st.selectbox(
+            "Status",
+            ["All Status", "active", "draft", "deprecated"],
+            key="product_status_filter"
+        )
+    
+    with col3:
+        search_query = st.text_input("🔍 Search products", key="product_search")
+    
+    with col4:
+        sort_by = st.selectbox(
+            "Sort by",
+            ["Name", "Trust Score", "Usage Count", "Rating"],
+            key="product_sort"
+        )
+    
+    # Apply filters
+    filtered_products = list(products.values())
+    
+    if domain_filter != "All Domains":
+        filtered_products = [p for p in filtered_products if p.domain == domain_filter]
+    
+    if status_filter != "All Status":
+        filtered_products = [p for p in filtered_products if p.status == status_filter]
+    
+    if search_query:
+        query_lower = search_query.lower()
+        filtered_products = [
+            p for p in filtered_products
+            if query_lower in p.name.lower() or
+               query_lower in p.business_purpose.lower() or
+               any(query_lower in tag.lower() for tag in p.tags)
+        ]
+    
+    # Sort
+    if sort_by == "Trust Score":
+        filtered_products.sort(key=lambda x: x.aggregated_trust_score, reverse=True)
+    elif sort_by == "Usage Count":
+        filtered_products.sort(key=lambda x: x.usage_count, reverse=True)
+    elif sort_by == "Rating":
+        filtered_products.sort(key=lambda x: x.rating, reverse=True)
+    else:
+        filtered_products.sort(key=lambda x: x.name)
+    
+    st.markdown(f"**Showing {len(filtered_products)} products**")
+    st.markdown("---")
+    
+    # Product cards in grid
+    if not filtered_products:
+        st.info("No products found matching your criteria.")
+    else:
+        # Display 2 products per row
+        for i in range(0, len(filtered_products), 2):
+            cols = st.columns(2)
+            
+            for j, col in enumerate(cols):
+                if i + j < len(filtered_products):
+                    product = filtered_products[i + j]
+                    
+                    with col:
+                        render_product_card(product, tables, contracts, trust_scores, product_engine)
+
+
+def render_product_card(
+    product: DataProduct,
+    tables: List[Dict],
+    contracts: Dict[str, DataContract],
+    trust_scores: List[DataTrustScore],
+    product_engine: DataProductEngine
+):
+    """Render a single product card"""
+    
+    # Status colors
+    status_colors = {
+        "active": "#28a745",
+        "draft": "#6c757d",
+        "deprecated": "#dc3545"
+    }
+    
+    # Trust level colors
+    trust_colors = {
+        "Platinum": "#E5E4E2",
+        "Gold": "#FFD700",
+        "Silver": "#C0C0C0",
+        "Bronze": "#CD7F32",
+        "Needs Attention": "#e74c3c"
+    }
+    
+    status_color = status_colors.get(product.status, "#6c757d")
+    trust_color = trust_colors.get(product.trust_level, "#6c757d")
+    
+    # Card container
+    with st.container():
+        st.markdown(f"""
+            <div style="border: 2px solid #e0e0e0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; 
+                        background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 5px solid {status_color};">
+                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.5rem;">
+                    <h3 style="margin: 0; color: #333;">📦 {product.name}</h3>
+                    <span style="background: {status_color}; color: white; padding: 0.25rem 0.75rem; 
+                                border-radius: 12px; font-size: 0.8rem; font-weight: 600;">{product.status.upper()}</span>
+                </div>
+                <p style="color: #666; font-size: 0.9rem; margin-bottom: 0.75rem;">{product.domain}</p>
+                <p style="color: #555; font-size: 0.85rem; margin-bottom: 1rem; line-height: 1.4;">
+                    {product.business_purpose[:150]}{'...' if len(product.business_purpose) > 150 else ''}
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        # Metrics row
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("⭐ Rating", f"{product.rating:.1f}")
+        with col2:
+            st.metric("👥 Users", product.consumer_count)
+        with col3:
+            st.metric("📊 Tables", len(product.table_fqns))
+        with col4:
+            st.metric("🛡️ Trust", f"{product.aggregated_trust_score:.0f}%")
+        
+        # Tags
+        if product.tags:
+            tags_html = " ".join([
+                f'<span style="background: #e9ecef; color: #495057; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; margin-right: 0.25rem;">{tag}</span>'
+                for tag in product.tags[:5]
+            ])
+            st.markdown(tags_html, unsafe_allow_html=True)
+        
+        # View Details button
+        if st.button(f"View Details", key=f"view_{product.id}"):
+            st.session_state.selected_product_id = product.id
+        
+        # Show detail view if selected
+        if st.session_state.selected_product_id == product.id:
+            render_product_detail(product, tables, contracts, trust_scores, product_engine)
+
+
+def render_product_detail(
+    product: DataProduct,
+    tables: List[Dict],
+    contracts: Dict[str, DataContract],
+    trust_scores: List[DataTrustScore],
+    product_engine: DataProductEngine
+):
+    """Render detailed product view"""
+    
+    with st.expander("📋 Product Details", expanded=True):
+        
+        # Tabs for different sections
+        detail_tab1, detail_tab2, detail_tab3, detail_tab4, detail_tab5 = st.tabs([
+            "Overview", "Metrics", "Schema", "Output Ports", "Manifest"
+        ])
+        
+        with detail_tab1:
+            st.markdown("### Business Purpose")
+            st.markdown(product.business_purpose)
+            
+            st.markdown("### Target Personas")
+            for persona in product.target_personas:
+                st.markdown(f"- 👤 {persona}")
+            
+            st.markdown("### Data Assets Included")
+            for asset in product.data_assets:
+                st.markdown(f"- 📁 {asset}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("### Product Metadata")
+                st.markdown(f"**ID:** `{product.id}`")
+                st.markdown(f"**Version:** {product.version}")
+                st.markdown(f"**Owner:** {product.owner}")
+                st.markdown(f"**Created:** {product.created_date.strftime('%Y-%m-%d')}")
+            
+            with col2:
+                st.markdown("### Trust & Quality")
+                st.markdown(f"**Trust Score:** {product.aggregated_trust_score:.1f}%")
+                st.markdown(f"**Trust Level:** {product.trust_level}")
+                st.markdown(f"**Tables Covered:** {len(product.table_fqns)}")
+                st.markdown(f"**Contracts Linked:** {len(product.contract_ids)}")
+        
+        with detail_tab2:
+            st.markdown("### 🎯 North Star Metric")
+            ns = product.north_star_metric
+            st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                            padding: 1.5rem; border-radius: 12px; color: white; margin-bottom: 1rem;">
+                    <h4 style="margin: 0; color: white;">{ns.name}</h4>
+                    <p style="margin: 0.5rem 0; opacity: 0.9;">{ns.description}</p>
+                    <code style="background: rgba(255,255,255,0.2); padding: 0.25rem 0.5rem; border-radius: 4px;">
+                        {ns.formula}
+                    </code>
+                    <span style="margin-left: 1rem;">Unit: {ns.unit}</span>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("### 📊 Functional Metrics")
+            for metric in product.functional_metrics:
+                st.markdown(f"""
+                    **{metric.name}** ({metric.unit})  
+                    {metric.description}  
+                    `{metric.formula}`
+                """)
+                st.markdown("---")
+            
+            st.markdown("### 📈 Granular Metrics")
+            for metric in product.granular_metrics:
+                st.markdown(f"""
+                    **{metric.name}** ({metric.unit})  
+                    {metric.description}  
+                    `{metric.formula}`
+                """)
+        
+        with detail_tab3:
+            st.markdown("### Constituent Tables")
+            
+            # Get table details
+            product_tables = [t for t in tables if t.get("fullyQualifiedName") in product.table_fqns]
+            
+            if product_tables:
+                table_data = []
+                for table in product_tables:
+                    fqn = table.get("fullyQualifiedName", "")
+                    has_contract = fqn in contracts
+                    
+                    # Find trust score
+                    trust = next((ts for ts in trust_scores if ts.fqn == fqn), None)
+                    
+                    table_data.append({
+                        "Table": table.get("name", ""),
+                        "FQN": fqn,
+                        "Data Asset": table.get("data_asset", "N/A"),
+                        "Columns": len(table.get("columns", [])),
+                        "Contract": "✅" if has_contract else "❌",
+                        "Trust Score": f"{trust.composite_trust_score:.1f}" if trust else "N/A"
+                    })
+                
+                st.dataframe(pd.DataFrame(table_data), use_container_width=True)
+            else:
+                st.info("No table details available.")
+        
+        with detail_tab4:
+            st.markdown("### Output Ports")
+            st.markdown("*How consumers can access this data product*")
+            
+            for port in product.output_ports:
+                port_icons = {
+                    "dataset": "📁",
+                    "api": "🔌",
+                    "stream": "📡",
+                    "dashboard": "📊"
+                }
+                icon = port_icons.get(port.port_type, "📦")
+                
+                st.markdown(f"""
+                    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; margin-bottom: 0.5rem;">
+                        <strong>{icon} {port.name}</strong>
+                        <span style="background: #e9ecef; padding: 0.2rem 0.5rem; border-radius: 4px; 
+                                    font-size: 0.75rem; margin-left: 0.5rem;">{port.port_type}</span>
+                        <span style="background: #d4edda; padding: 0.2rem 0.5rem; border-radius: 4px; 
+                                    font-size: 0.75rem; margin-left: 0.25rem;">{port.format}</span>
+                        <p style="margin: 0.5rem 0 0 0; color: #666; font-size: 0.9rem;">{port.description}</p>
+                        <small style="color: #888;">Access: {port.access_pattern}</small>
+                    </div>
+                """, unsafe_allow_html=True)
+        
+        with detail_tab5:
+            st.markdown("### Product Manifest (YAML)")
+            st.markdown("*DataOS-style declarative specification*")
+            
+            manifest = product_engine.generate_product_manifest(product)
+            st.code(manifest, language="yaml")
+            
+            st.download_button(
+                label="⬇️ Download Manifest",
+                data=manifest,
+                file_name=f"{product.name.lower().replace(' ', '_')}_manifest.yaml",
+                mime="text/yaml"
+            )
+        
+        # Close button
+        if st.button("Close Details", key=f"close_{product.id}"):
+            st.session_state.selected_product_id = None
+            st.rerun()
+
+
+def render_product_creation_wizard(
+    tables: List[Dict],
+    contracts: Dict[str, DataContract],
+    product_engine: DataProductEngine
+):
+    """Render the product creation wizard with Right-to-Left flow"""
+    
+    st.markdown("### ➕ Create New Data Product")
+    st.markdown("*Follow the Right-to-Left approach: start with business purpose, then define metrics, select data*")
+    
+    # Initialize wizard state
+    if "product_wizard_step" not in st.session_state:
+        st.session_state.product_wizard_step = 1
+    
+    # Step indicators
+    steps = ["Business Purpose", "Define Metrics", "Select Data", "Configure Outputs", "Review & Create"]
+    current_step = st.session_state.product_wizard_step
+    
+    # Progress bar
+    progress = (current_step - 1) / (len(steps) - 1)
+    st.progress(progress)
+    
+    # Step indicator
+    step_cols = st.columns(len(steps))
+    for i, (col, step_name) in enumerate(zip(step_cols, steps), 1):
+        with col:
+            if i < current_step:
+                st.markdown(f"✅ **{i}. {step_name}**")
+            elif i == current_step:
+                st.markdown(f"🔵 **{i}. {step_name}**")
+            else:
+                st.markdown(f"⚪ {i}. {step_name}")
+    
+    st.markdown("---")
+    
+    # Initialize form data
+    if "new_product" not in st.session_state:
+        st.session_state.new_product = {
+            "name": "",
+            "domain": "Deliver",
+            "business_purpose": "",
+            "target_personas": [],
+            "north_star": {"name": "", "description": "", "formula": "", "unit": ""},
+            "functional_metrics": [],
+            "granular_metrics": [],
+            "data_assets": [],
+            "table_fqns": [],
+            "output_ports": [],
+            "tags": []
+        }
+    
+    # Step 1: Business Purpose
+    if current_step == 1:
+        st.markdown("### Step 1: Define Business Purpose")
+        st.markdown("*Start with WHY - what business question does this product answer?*")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.session_state.new_product["name"] = st.text_input(
+                "Product Name *",
+                value=st.session_state.new_product["name"],
+                placeholder="e.g., Delivery Performance Tracker"
+            )
+        
+        with col2:
+            st.session_state.new_product["domain"] = st.selectbox(
+                "Domain *",
+                ALLOWED_DOMAINS,
+                index=ALLOWED_DOMAINS.index(st.session_state.new_product["domain"])
+            )
+        
+        st.session_state.new_product["business_purpose"] = st.text_area(
+            "Business Purpose *",
+            value=st.session_state.new_product["business_purpose"],
+            placeholder="What business question does this product answer? What decisions will it enable?",
+            height=100
+        )
+        
+        # Target personas
+        st.markdown("**Target Personas** - Who will use this product?")
+        personas_input = st.text_input(
+            "Enter personas (comma-separated)",
+            value=", ".join(st.session_state.new_product["target_personas"]),
+            placeholder="e.g., Supply Chain Manager, Logistics Analyst, Operations Director"
+        )
+        if personas_input:
+            st.session_state.new_product["target_personas"] = [p.strip() for p in personas_input.split(",") if p.strip()]
+        
+        # Tags
+        tags_input = st.text_input(
+            "Tags (comma-separated)",
+            value=", ".join(st.session_state.new_product["tags"]),
+            placeholder="e.g., delivery, logistics, performance"
+        )
+        if tags_input:
+            st.session_state.new_product["tags"] = [t.strip() for t in tags_input.split(",") if t.strip()]
+    
+    # Step 2: Define Metrics
+    elif current_step == 2:
+        st.markdown("### Step 2: Define Metrics (Metric Dependency Tree)")
+        st.markdown("*Define the metrics hierarchy: North Star → Functional → Granular*")
+        
+        st.markdown("#### 🎯 North Star Metric")
+        st.markdown("*The primary KPI that matters most*")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.session_state.new_product["north_star"]["name"] = st.text_input(
+                "Metric Name *",
+                value=st.session_state.new_product["north_star"]["name"],
+                placeholder="e.g., On-Time Delivery Rate"
+            )
+            st.session_state.new_product["north_star"]["formula"] = st.text_input(
+                "Formula *",
+                value=st.session_state.new_product["north_star"]["formula"],
+                placeholder="e.g., COUNT(on_time) / COUNT(total) * 100"
+            )
+        
+        with col2:
+            st.session_state.new_product["north_star"]["description"] = st.text_input(
+                "Description",
+                value=st.session_state.new_product["north_star"]["description"],
+                placeholder="What does this metric measure?"
+            )
+            st.session_state.new_product["north_star"]["unit"] = st.text_input(
+                "Unit",
+                value=st.session_state.new_product["north_star"]["unit"],
+                placeholder="e.g., %, $, count"
+            )
+        
+        st.markdown("---")
+        st.markdown("#### 📊 Functional Metrics")
+        st.markdown("*Supporting metrics that feed into the North Star*")
+        
+        # Display existing functional metrics
+        for i, metric in enumerate(st.session_state.new_product["functional_metrics"]):
+            st.markdown(f"**{i+1}. {metric['name']}** - `{metric['formula']}` ({metric['unit']})")
+        
+        # Add new functional metric
+        with st.expander("➕ Add Functional Metric"):
+            f_name = st.text_input("Name", key="func_name")
+            f_formula = st.text_input("Formula", key="func_formula")
+            f_unit = st.text_input("Unit", key="func_unit")
+            f_desc = st.text_input("Description", key="func_desc")
+            
+            if st.button("Add Functional Metric"):
+                if f_name and f_formula:
+                    st.session_state.new_product["functional_metrics"].append({
+                        "name": f_name, "formula": f_formula, "unit": f_unit, "description": f_desc
+                    })
+                    st.rerun()
+        
+        st.markdown("---")
+        st.markdown("#### 📈 Granular Metrics")
+        st.markdown("*Detailed operational metrics*")
+        
+        # Display existing granular metrics
+        for i, metric in enumerate(st.session_state.new_product["granular_metrics"]):
+            st.markdown(f"**{i+1}. {metric['name']}** - `{metric['formula']}` ({metric['unit']})")
+        
+        # Add new granular metric
+        with st.expander("➕ Add Granular Metric"):
+            g_name = st.text_input("Name", key="gran_name")
+            g_formula = st.text_input("Formula", key="gran_formula")
+            g_unit = st.text_input("Unit", key="gran_unit")
+            g_desc = st.text_input("Description", key="gran_desc")
+            
+            if st.button("Add Granular Metric"):
+                if g_name and g_formula:
+                    st.session_state.new_product["granular_metrics"].append({
+                        "name": g_name, "formula": g_formula, "unit": g_unit, "description": g_desc
+                    })
+                    st.rerun()
+    
+    # Step 3: Select Data
+    elif current_step == 3:
+        st.markdown("### Step 3: Select Underlying Data")
+        st.markdown("*Choose the data assets and tables that power this product*")
+        
+        selected_domain = st.session_state.new_product["domain"]
+        
+        # Data Assets selection
+        st.markdown("#### 📁 Data Assets")
+        available_assets = DATA_ASSETS.get(selected_domain, [])
+        
+        if available_assets:
+            selected_assets = st.multiselect(
+                "Select Data Assets",
+                available_assets,
+                default=st.session_state.new_product["data_assets"]
+            )
+            st.session_state.new_product["data_assets"] = selected_assets
+        else:
+            st.info(f"No data assets defined for {selected_domain} domain yet.")
+        
+        # Tables selection
+        st.markdown("#### 📋 Tables")
+        
+        # Filter tables by domain and selected assets
+        domain_tables = [t for t in tables if t.get("domain") == selected_domain]
+        
+        if st.session_state.new_product["data_assets"]:
+            domain_tables = [
+                t for t in domain_tables 
+                if t.get("data_asset") in st.session_state.new_product["data_assets"]
+            ]
+        
+        if domain_tables:
+            table_options = {
+                t.get("fullyQualifiedName"): f"{t.get('name')} ({t.get('data_asset', 'N/A')})"
+                for t in domain_tables
+            }
+            
+            selected_fqns = st.multiselect(
+                "Select Tables",
+                list(table_options.keys()),
+                default=[f for f in st.session_state.new_product["table_fqns"] if f in table_options],
+                format_func=lambda x: table_options.get(x, x)
+            )
+            st.session_state.new_product["table_fqns"] = selected_fqns
+            
+            st.markdown(f"**Selected: {len(selected_fqns)} tables**")
+        else:
+            st.info("No tables found for selected criteria.")
+    
+    # Step 4: Configure Outputs
+    elif current_step == 4:
+        st.markdown("### Step 4: Configure Output Ports")
+        st.markdown("*Define how consumers will access this product*")
+        
+        # Display existing ports
+        for i, port in enumerate(st.session_state.new_product["output_ports"]):
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.markdown(f"**{port['name']}** - {port['port_type']} ({port['format']})")
+            with col2:
+                if st.button("Remove", key=f"remove_port_{i}"):
+                    st.session_state.new_product["output_ports"].pop(i)
+                    st.rerun()
+        
+        st.markdown("---")
+        
+        # Add new output port
+        st.markdown("#### ➕ Add Output Port")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            port_name = st.text_input("Port Name", placeholder="e.g., Analytics Dataset")
+            port_type = st.selectbox("Port Type", ["dataset", "api", "stream", "dashboard"])
+        
+        with col2:
+            format_options = {
+                "dataset": ["parquet", "csv", "json", "delta"],
+                "api": ["rest", "graphql"],
+                "stream": ["kafka", "json", "avro"],
+                "dashboard": ["powerbi", "tableau", "looker"]
+            }
+            port_format = st.selectbox("Format", format_options.get(port_type, ["json"]))
+            access_pattern = st.selectbox("Access Pattern", ["batch", "real-time", "on-demand"])
+        
+        with col3:
+            port_desc = st.text_area("Description", height=100)
+        
+        if st.button("Add Output Port"):
+            if port_name:
+                st.session_state.new_product["output_ports"].append({
+                    "name": port_name,
+                    "port_type": port_type,
+                    "format": port_format,
+                    "description": port_desc,
+                    "access_pattern": access_pattern
+                })
+                st.rerun()
+    
+    # Step 5: Review & Create
+    elif current_step == 5:
+        st.markdown("### Step 5: Review & Create")
+        st.markdown("*Review your product configuration before creating*")
+        
+        product_data = st.session_state.new_product
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Product Details")
+            st.markdown(f"**Name:** {product_data['name']}")
+            st.markdown(f"**Domain:** {product_data['domain']}")
+            st.markdown(f"**Purpose:** {product_data['business_purpose'][:200]}...")
+            st.markdown(f"**Personas:** {', '.join(product_data['target_personas'])}")
+            st.markdown(f"**Tags:** {', '.join(product_data['tags'])}")
+        
+        with col2:
+            st.markdown("#### Composition")
+            st.markdown(f"**Data Assets:** {len(product_data['data_assets'])}")
+            st.markdown(f"**Tables:** {len(product_data['table_fqns'])}")
+            st.markdown(f"**Output Ports:** {len(product_data['output_ports'])}")
+            st.markdown(f"**Functional Metrics:** {len(product_data['functional_metrics'])}")
+            st.markdown(f"**Granular Metrics:** {len(product_data['granular_metrics'])}")
+        
+        st.markdown("---")
+        
+        st.markdown("#### North Star Metric")
+        st.markdown(f"**{product_data['north_star']['name']}**: `{product_data['north_star']['formula']}`")
+        
+        # Validation
+        errors = []
+        if not product_data["name"]:
+            errors.append("Product name is required")
+        if not product_data["business_purpose"]:
+            errors.append("Business purpose is required")
+        if not product_data["north_star"]["name"]:
+            errors.append("North Star metric is required")
+        if not product_data["table_fqns"]:
+            errors.append("At least one table must be selected")
+        
+        if errors:
+            st.error("Please fix the following issues:")
+            for error in errors:
+                st.markdown(f"- {error}")
+        else:
+            st.success("✅ Product configuration is valid!")
+            
+            if st.button("🚀 Create Data Product", type="primary"):
+                # Find contract IDs for selected tables
+                contract_ids = []
+                for fqn in product_data["table_fqns"]:
+                    if fqn in contracts:
+                        contract_ids.append(contracts[fqn].id)
+                
+                # Create the product
+                new_product = product_engine.create_product(
+                    name=product_data["name"],
+                    domain=product_data["domain"],
+                    business_purpose=product_data["business_purpose"],
+                    target_personas=product_data["target_personas"],
+                    north_star_metric=product_data["north_star"],
+                    functional_metrics=product_data["functional_metrics"],
+                    granular_metrics=product_data["granular_metrics"],
+                    data_assets=product_data["data_assets"],
+                    table_fqns=product_data["table_fqns"],
+                    contract_ids=contract_ids,
+                    output_ports=product_data["output_ports"],
+                    owner="current_user",  # Would be actual user in production
+                    tags=product_data["tags"]
+                )
+                
+                st.success(f"✅ Data Product '{new_product.name}' created successfully!")
+                st.balloons()
+                
+                # Reset wizard
+                st.session_state.product_wizard_step = 1
+                st.session_state.new_product = {
+                    "name": "", "domain": "Deliver", "business_purpose": "",
+                    "target_personas": [], "north_star": {"name": "", "description": "", "formula": "", "unit": ""},
+                    "functional_metrics": [], "granular_metrics": [],
+                    "data_assets": [], "table_fqns": [], "output_ports": [], "tags": []
+                }
+                st.rerun()
+    
+    # Navigation buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col1:
+        if current_step > 1:
+            if st.button("⬅️ Previous"):
+                st.session_state.product_wizard_step -= 1
+                st.rerun()
+    
+    with col3:
+        if current_step < 5:
+            if st.button("Next ➡️"):
+                st.session_state.product_wizard_step += 1
+                st.rerun()
+
+
+def render_product_analytics(products: Dict[str, DataProduct], trust_scores: List[DataTrustScore]):
+    """Render product analytics dashboard"""
+    
+    st.markdown("### 📊 Product Analytics")
+    
+    if not products:
+        st.info("No products available for analytics.")
+        return
+    
+    # Product performance overview
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Trust score distribution
+        st.markdown("#### Trust Score by Product")
+        
+        product_trust_data = [
+            {"Product": p.name, "Trust Score": p.aggregated_trust_score, "Level": p.trust_level}
+            for p in products.values()
+        ]
+        
+        df = pd.DataFrame(product_trust_data).sort_values("Trust Score", ascending=False)
+        
+        colors = ['#27ae60' if s >= 75 else '#f39c12' if s >= 60 else '#e74c3c' 
+                 for s in df["Trust Score"]]
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df["Product"],
+            y=df["Trust Score"],
+            marker_color=colors,
+            text=[f"{s:.0f}%" for s in df["Trust Score"]],
+            textposition='auto'
+        ))
+        
+        fig.update_layout(
+            xaxis_title="Product",
+            yaxis_title="Trust Score",
+            yaxis=dict(range=[0, 100]),
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Usage distribution
+        st.markdown("#### Product Usage")
+        
+        usage_data = [
+            {"Product": p.name, "Usage": p.usage_count, "Consumers": p.consumer_count}
+            for p in products.values()
+        ]
+        
+        df = pd.DataFrame(usage_data).sort_values("Usage", ascending=False)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df["Product"],
+            y=df["Usage"],
+            name="Usage Count",
+            marker_color='#3498db'
+        ))
+        
+        fig.update_layout(
+            xaxis_title="Product",
+            yaxis_title="Usage Count",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Status distribution
+    st.markdown("#### Product Status Distribution")
+    
+    status_counts = defaultdict(int)
+    for p in products.values():
+        status_counts[p.status] += 1
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        fig = go.Figure(data=[go.Pie(
+            labels=list(status_counts.keys()),
+            values=list(status_counts.values()),
+            marker_colors=['#28a745', '#6c757d', '#dc3545'],
+            hole=0.4
+        )])
+        
+        fig.update_layout(
+            title="By Status",
+            height=300
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Products table
+        st.markdown("#### All Products Summary")
+        
+        summary_data = [
+            {
+                "Product": p.name,
+                "Domain": p.domain,
+                "Status": p.status,
+                "Trust": f"{p.aggregated_trust_score:.0f}%",
+                "Tables": len(p.table_fqns),
+                "Consumers": p.consumer_count,
+                "Rating": f"⭐ {p.rating:.1f}"
+            }
+            for p in products.values()
+        ]
+        
+        st.dataframe(pd.DataFrame(summary_data), use_container_width=True, height=250)
+
+# =============================================================================
 # MAIN APPLICATION
 # =============================================================================
 
@@ -5305,8 +6706,9 @@ def main():
             st.metric("Active Contracts", 
                      len([c for c in st.session_state.contract_engine.contracts.values() 
                           if c.status == "active"]))
+            st.metric("Data Products",
+                     len(st.session_state.product_engine.products) if hasattr(st.session_state, 'product_engine') else 0)
             st.metric("Domains", len(ALLOWED_DOMAINS))
-            st.metric("Databases", len(ALLOWED_DATABASES))
             
             # Governance score
             if hasattr(st.session_state, 'governance_metrics'):
@@ -5324,7 +6726,7 @@ def main():
             st.caption(f"• {db}")
         
         st.markdown("---")
-        st.caption("v2.0.0 | Enterprise Edition")
+        st.caption("v3.0.0 | Data Products Edition")
     
     # Settings dialog
     if st.session_state.get("show_settings", False):
@@ -5385,6 +6787,19 @@ def main():
                     tables, contracts
                 )
                 
+                # Calculate trust scores for all tables (needed for product aggregation)
+                st.session_state.trust_scores = st.session_state.trust_engine.calculate_all_trust_scores(
+                    tables, contracts, mock_gen
+                )
+                
+                # Initialize Data Product Engine and generate mock products
+                st.session_state.product_engine = DataProductEngine()
+                if st.session_state.demo_mode:
+                    products = mock_gen.generate_mock_data_products(
+                        tables, contracts, st.session_state.trust_scores
+                    )
+                    st.session_state.product_engine.products = products
+                
                 st.session_state.total_tables = len(tables)
                 st.session_state.data_loaded = True
                 st.rerun()
@@ -5395,8 +6810,9 @@ def main():
                 return
     
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🏛️ Governance Dashboard",
+        "📦 Data Products",
         "🔍 Data Discovery",
         "📜 Contract Management",
         "🎯 Data Trust Scorecard"
@@ -5410,12 +6826,21 @@ def main():
         )
     
     with tab2:
+        render_data_products(
+            st.session_state.product_engine.products,
+            st.session_state.tables,
+            st.session_state.contract_engine.contracts,
+            st.session_state.trust_scores,
+            st.session_state.product_engine
+        )
+    
+    with tab3:
         render_data_discovery(
             st.session_state.tables,
             st.session_state.contract_engine.contracts
         )
     
-    with tab3:
+    with tab4:
         render_contract_management(
             st.session_state.tables,
             st.session_state.contract_engine.contracts,
@@ -5423,7 +6848,7 @@ def main():
             st.session_state.mock_gen
         )
     
-    with tab4:
+    with tab5:
         render_trust_scorecard(
             st.session_state.tables,
             st.session_state.contract_engine.contracts,
